@@ -38,6 +38,41 @@ impl World {
             .iter()
             .find(|thread| thread_key(thread.coord) == key)
     }
+
+    /// A thread title, or a thread or scroll coordinate.
+    pub fn find_thread(&self, query: &str) -> Result<&Thread, String> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Err("name a thread".into());
+        }
+        if let Ok(target) = crate::coord::parse_target(query) {
+            let coord = match target {
+                Target::Thread(coord) | Target::Scroll(coord) => coord,
+            };
+            let key = thread_key(coord);
+            return self
+                .thread(&key)
+                .ok_or_else(|| format!("no thread at {key}"));
+        }
+        let mut found: Option<&Thread> = None;
+        for thread in &self.threads {
+            if thread.title.eq_ignore_ascii_case(query) {
+                if found.is_some() {
+                    return Err(format!("more than one thread named {query}"));
+                }
+                found = Some(thread);
+            }
+        }
+        found.ok_or_else(|| {
+            let known = self
+                .threads
+                .iter()
+                .map(|thread| thread.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("no thread {query}. known: {known}")
+        })
+    }
 }
 
 pub struct Post {
@@ -562,6 +597,17 @@ mod tests {
                 || voices.contains(seed::JULES)
                 || voices.contains(seed::REN)
         );
+    }
+
+    #[test]
+    fn threads_open_by_title_or_coordinate() {
+        let world = world_from(&seed::document(seed::demo_instant()));
+        assert_eq!(world.find_thread("fern wall").unwrap().title, FERN);
+        assert_eq!(world.find_thread(seed::FERN_THREAD).unwrap().title, FERN);
+        assert_eq!(world.find_thread("1.2.1/1.1.1/1.1.4").unwrap().title, FERN);
+        let missing = world.find_thread("not a room").unwrap_err();
+        assert!(missing.contains("Fern wall"), "{missing}");
+        assert!(world.find_thread("9.9.9/9.9.9").is_err());
     }
 
     #[test]

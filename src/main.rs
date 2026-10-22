@@ -4,25 +4,40 @@ use std::process::ExitCode;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 
+use lanes::calm;
+use lanes::config::Settings;
 use lanes::coord::{format_coord, parse_target, thread_key, Target};
 use lanes::rank;
-use lanes::store::{Post, Store};
+use lanes::store::{Post, Store, World};
 use lanes::Error;
 
 #[derive(Parser, Debug)]
 #[command(
     name = "lanes",
     version,
-    about = "Predictive multi-chat stored as one phext file"
+    about = "A short feed over one phext file",
+    disable_help_subcommand = true
 )]
 struct Cli {
-    /// Path to the chat phext. Created and seeded if it is missing.
-    #[arg(long, global = true, default_value = "data/chat.phext")]
-    file: PathBuf,
+    /// Phext file. Defaults to data/chat.phext, or LANES_FILE, or lanes.json.
+    #[arg(long, global = true)]
+    file: Option<PathBuf>,
 
-    /// Listen port for the reading room.
+    /// Who is reading and posting. Defaults to mira, or LANES_USER, or lanes.json.
+    #[arg(long, global = true)]
+    user: Option<String>,
+
+    /// Listen port when no command is given.
     #[arg(long, global = true, default_value_t = 7841)]
     port: u16,
+
+    /// Replace the phext with the demo cast, then run the command.
+    #[arg(long, global = true)]
+    seed: bool,
+
+    /// Show coordinates, scores, and what the feed held back.
+    #[arg(long, global = true)]
+    details: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -30,47 +45,28 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Serve the reading room. This is also the default.
-    Serve,
-    /// Replace the phext with the demo cast.
-    Seed,
-    /// Place a message. Omit --coord to predict one from --user's interests.
+    /// One line for each relevant thread.
+    Feed,
+    /// Write a message. The thread is chosen from the words unless --coord is set.
     Post {
-        /// Display name or reader id (`mira`, `Casey Horn`).
-        #[arg(long)]
-        author: String,
         #[arg(long)]
         text: String,
         /// Thread `1.2.1/1.1.1` or scroll `1.2.1/1.1.1/1.1.4`.
         #[arg(long)]
         coord: Option<String>,
-        /// Whose interests guide prediction when --coord is omitted.
-        #[arg(long, default_value = "mira")]
-        user: String,
-    },
-    /// Ranked feed for a reader.
-    Feed {
-        #[arg(long, default_value = "mira")]
-        user: String,
-    },
-    /// Chronological room. Pass a thread or any scroll in it.
-    Room {
+        /// Print where this would land, and do not write.
         #[arg(long)]
-        coord: String,
+        preview: bool,
     },
-    /// Predict a coordinate for a message.
-    Suggest {
-        #[arg(long, default_value = "mira")]
-        user: String,
+    /// Read a thread. A title or coordinate; otherwise the top of the feed.
+    Read {
+        query: Option<String>,
+        /// Print one raw scroll.
         #[arg(long)]
-        text: String,
-    },
-    /// Thread index, phext::textmap, and phext::index byte offsets.
-    Toc,
-    /// Select one scroll with phext::fetch.
-    Select {
+        scroll: Option<String>,
+        /// Print the thread index and the phext table of contents.
         #[arg(long)]
-        coord: String,
+        index: bool,
     },
 }
 
@@ -82,7 +78,7 @@ extern "C" {
 #[tokio::main]
 async fn main() -> ExitCode {
     // `println` panics when a pipe closes. Restore the default SIGPIPE so
-    // `lanes toc | head` ends quietly.
+    // `lanes feed | head` ends quietly.
     #[cfg(unix)]
     unsafe {
         signal(13, 0);
@@ -98,106 +94,56 @@ async fn main() -> ExitCode {
 
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
-    match cli.command {
-        None | Some(Command::Serve) => lanes::server::serve(cli.file, cli.port).await,
-        Some(Command::Seed) => {
-            let mut store = Store::open(&cli.file)?;
-            store.reseed(Utc::now())?;
+    let settings = lanes::config::load(cli.user.as_deref(), cli.file.as_deref())?;
+    if cli.seed {
+        let mut store = Store::open(&settings.file)?;
+        store.reseed(Utc::now())?;
+        if cli.command.is_none() {
             println!("seeded {}", store.path().display());
+            return Ok(());
+        }
+    }
+    match cli.command {
+        None => lanes::server::serve(settings.file, cli.port).await,
+        Some(Command::Feed) => {
+            let store = Store::open(&settings.file)?;
+            print_feed(&store, &settings, cli.details)?;
             Ok(())
         }
         Some(Command::Post {
-            author,
             text,
             coord,
-            user,
+            preview,
         }) => {
-            let mut store = Store::open(&cli.file)?;
-            let world = store.world();
-            let reader = require_user(&world, &user)?;
-            let author_name = world
-                .find_user(&author)
-                .map(|found| found.name.clone())
-                .unwrap_or(author);
-            let target = if let Some(coord) = coord {
-                parse_target(&coord).map_err(Error::from)?
-            } else {
-                let suggestion =
-                    rank::suggest(&world.threads, &reader.interests, &text, Utc::now());
-                println!("{}", suggestion.reason);
-                Target::Scroll(suggestion.coord)
-            };
-            let placed = store.place(Post {
-                author: author_name,
-                text,
-                target,
-                now: Utc::now(),
-            })?;
-            println!(
-                "placed {}  {} / {}  {}",
-                format_coord(placed.coord),
-                placed.topic,
-                placed.title,
-                if placed.new_thread {
-                    "new thread"
-                } else {
-                    "existing thread"
-                }
-            );
-            Ok(())
+            let mut store = Store::open(&settings.file)?;
+            post(
+                &mut store,
+                &settings,
+                &text,
+                coord.as_deref(),
+                preview,
+                cli.details,
+            )
         }
-        Some(Command::Feed { user }) => {
-            let store = Store::open(&cli.file)?;
-            print_feed(&store, &user)?;
-            Ok(())
-        }
-        Some(Command::Room { coord }) => {
-            let store = Store::open(&cli.file)?;
-            print_room(&store, &coord)?;
-            Ok(())
-        }
-        Some(Command::Suggest { user, text }) => {
-            let store = Store::open(&cli.file)?;
-            let world = store.world();
-            let reader = require_user(&world, &user)?;
-            let suggestion = rank::suggest(&world.threads, &reader.interests, &text, Utc::now());
-            println!("{}", format_coord(suggestion.coord));
-            println!(
-                "{} / {}{}",
-                suggestion.topic,
-                suggestion.title,
-                if suggestion.new_thread { "  (new)" } else { "" }
-            );
-            println!("{}", suggestion.reason);
-            Ok(())
-        }
-        Some(Command::Toc) => {
-            let store = Store::open(&cli.file)?;
-            print_toc(&store);
-            Ok(())
-        }
-        Some(Command::Select { coord }) => {
-            let Target::Scroll(coord) = parse_target(&coord).map_err(Error::from)? else {
-                return Err(Error::Bad(
-                    "select needs a full scroll coordinate, like 1.2.1/1.1.1/1.1.2".into(),
-                ));
-            };
-            let store = Store::open(&cli.file)?;
-            let raw = store.select(coord);
-            if raw.is_empty() {
-                println!("(empty scroll)");
-            } else {
-                println!("{raw}");
-            }
-            Ok(())
+        Some(Command::Read {
+            query,
+            scroll,
+            index,
+        }) => {
+            let store = Store::open(&settings.file)?;
+            read(
+                &store,
+                &settings,
+                query.as_deref(),
+                scroll.as_deref(),
+                index,
+                cli.details,
+            )
         }
     }
 }
 
-fn require_user<'a>(
-    world: &'a lanes::store::World,
-    query: &str,
-) -> Result<&'a lanes::model::User, Error> {
+fn require_user<'a>(world: &'a World, query: &str) -> Result<&'a lanes::model::User, Error> {
     world.find_user(query).ok_or_else(|| {
         let known = world
             .users
@@ -209,117 +155,262 @@ fn require_user<'a>(
     })
 }
 
-fn print_feed(store: &Store, query: &str) -> Result<(), Error> {
+fn print_feed(store: &Store, settings: &Settings, details: bool) -> Result<(), Error> {
     let world = store.world();
-    let user = require_user(&world, query)?;
-    let now = Utc::now();
+    let user = require_user(&world, &settings.user)?;
     let feed = rank::build_feed(
         &world.threads,
         &user.interests,
-        now,
+        Utc::now(),
         rank::AUTHOR_CAP,
         rank::MAX_THREADS,
     );
-    println!("{}  ·  {}", user.name, user.blurb);
-    let interests = user
-        .interests
-        .iter()
-        .map(|coord| thread_key(*coord))
-        .collect::<Vec<_>>()
-        .join(", ");
-    println!("interests  {interests}");
-    println!(
-        "cap        {} messages from any one author\n",
-        rank::AUTHOR_CAP
-    );
-    for thread in &feed.threads {
-        println!(
-            "{}  {}  {}  distance {}",
-            thread.title,
-            thread_key(thread.coord),
-            thread.nearness,
-            thread.distance
-        );
-        for message in &thread.admitted {
-            println!("  {:<16} {}", message.author, first_line(&message.text));
-        }
-        if !thread.held.is_empty() {
-            let mut authors: Vec<&str> = thread
-                .held
-                .iter()
-                .map(|message| message.author.as_str())
-                .collect();
-            authors.sort();
-            authors.dedup();
-            for author in authors {
-                let count = thread
-                    .held
-                    .iter()
-                    .filter(|message| message.author == author)
-                    .count();
-                println!("  lane  {author} × {count} held");
-            }
-        }
-        println!();
+    if feed.threads.is_empty() {
+        println!("Nothing here yet.");
+        return Ok(());
     }
-    for lane in &feed.lanes {
-        println!(
-            "side lane  {} × {} held, {} shown",
-            lane.author, lane.held, lane.shown
-        );
-    }
+    println!("{}", calm::format_feed(&feed, details));
     Ok(())
 }
 
-fn print_room(store: &Store, coord: &str) -> Result<(), Error> {
-    let target = parse_target(coord).map_err(Error::from)?;
-    let key = match target {
-        Target::Thread(coord) | Target::Scroll(coord) => thread_key(coord),
+fn post(
+    store: &mut Store,
+    settings: &Settings,
+    text: &str,
+    coord: Option<&str>,
+    preview: bool,
+    details: bool,
+) -> Result<(), Error> {
+    let world = store.world();
+    let reader = require_user(&world, &settings.user)?;
+    let interests = reader.interests.clone();
+    let author = reader.name.clone();
+    if preview {
+        print_destination(&world, &interests, text, coord, details)?;
+        return Ok(());
+    }
+    let target = match coord {
+        Some(coord) => parse_target(coord).map_err(Error::from)?,
+        None => {
+            let suggestion = rank::suggest(&world.threads, &interests, text, Utc::now());
+            Target::Scroll(suggestion.coord)
+        }
     };
-    let world = store.world();
-    let thread = world
-        .thread(&key)
-        .ok_or_else(|| Error::Bad(format!("no thread at {key}")))?;
-    let (author, count, share) = rank::majority(&thread.messages);
-    println!("{} / {}", thread.topic, thread.title);
-    println!("{key}  ·  {} messages", thread.messages.len());
-    if let Some(author) = author {
-        println!(
-            "{author} wrote {count} ({:.0}%){}",
-            share * 100.0,
-            if rank::is_flooded(thread.messages.len(), share) {
-                "  ·  flooded"
-            } else {
-                ""
-            }
-        );
-    }
-    println!();
-    for message in &thread.messages {
-        println!("{}  {}", message.author, format_coord(message.coord));
-        println!("  {}", first_line(&message.text));
+    let placed = store.place(Post {
+        author,
+        text: text.to_string(),
+        target,
+        now: Utc::now(),
+    })?;
+    println!("Posted to {}.", placed.title);
+    if details {
+        println!("{}", format_coord(placed.coord));
     }
     Ok(())
 }
 
-fn print_toc(store: &Store) {
-    let world = store.world();
-    println!("threads");
-    for thread in &world.threads {
-        println!(
-            "  {}  {} / {}  ({} messages)",
-            thread_key(thread.coord),
-            thread.topic,
-            thread.title,
-            thread.messages.len()
-        );
+fn print_destination(
+    world: &World,
+    interests: &[libphext::phext::Coordinate],
+    text: &str,
+    coord: Option<&str>,
+    details: bool,
+) -> Result<(), Error> {
+    if let Some(coord) = coord {
+        let target = parse_target(coord).map_err(Error::from)?;
+        let key = match target {
+            Target::Thread(coord) | Target::Scroll(coord) => thread_key(coord),
+        };
+        match world.thread(&key) {
+            Some(thread) => println!("Posting to: {}", thread.title),
+            None => println!("Posting to: a new thread"),
+        }
+        if details {
+            println!("{key}");
+        }
+        return Ok(());
     }
-    println!("\n--- phext::textmap ---");
-    println!("{}", store.toc());
-    println!("--- phext::index ---");
-    println!("{}", store.byte_index());
+    let suggestion = rank::suggest(&world.threads, interests, text, Utc::now());
+    println!("Posting to: {}", suggestion.title);
+    if details {
+        println!("{}", format_coord(suggestion.coord));
+        println!("{}", suggestion.reason);
+    }
+    Ok(())
 }
 
-fn first_line(text: &str) -> String {
-    text.lines().next().unwrap_or("").to_string()
+fn read(
+    store: &Store,
+    settings: &Settings,
+    query: Option<&str>,
+    scroll: Option<&str>,
+    index: bool,
+    details: bool,
+) -> Result<(), Error> {
+    if index && scroll.is_some() {
+        return Err(Error::Bad("use either --index or --scroll".into()));
+    }
+    if index {
+        print_index(store, details);
+        return Ok(());
+    }
+    if let Some(scroll) = scroll {
+        let Target::Scroll(coord) = parse_target(scroll).map_err(Error::from)? else {
+            return Err(Error::Bad(
+                "scroll needs a full coordinate, like 1.2.1/1.1.1/1.1.2".into(),
+            ));
+        };
+        let raw = store.select(coord);
+        if raw.is_empty() {
+            println!("(empty scroll)");
+        } else {
+            println!("{raw}");
+        }
+        return Ok(());
+    }
+    let world = store.world();
+    let thread = if let Some(query) = query {
+        world.find_thread(query).map_err(Error::from)?
+    } else {
+        let user = require_user(&world, &settings.user)?;
+        let feed = rank::build_feed(
+            &world.threads,
+            &user.interests,
+            Utc::now(),
+            rank::AUTHOR_CAP,
+            rank::MAX_THREADS,
+        );
+        let top = feed
+            .threads
+            .first()
+            .ok_or_else(|| Error::Bad("nothing to read".into()))?;
+        world
+            .thread(&thread_key(top.coord))
+            .ok_or_else(|| Error::Bad("nothing to read".into()))?
+    };
+    let text = calm::format_thread(thread, details);
+    if text.is_empty() {
+        println!("Nothing to read.");
+    } else {
+        println!("{text}");
+    }
+    Ok(())
+}
+
+fn print_index(store: &Store, details: bool) {
+    let world = store.world();
+    for thread in &world.threads {
+        if details {
+            println!(
+                "{}  {} / {}  ({} messages)",
+                thread_key(thread.coord),
+                thread.topic,
+                thread.title,
+                thread.messages.len()
+            );
+        } else {
+            println!("{}", thread.title);
+        }
+    }
+    if details {
+        println!("\n--- phext::textmap ---");
+        println!("{}", store.toc());
+        println!("--- phext::index ---");
+        println!("{}", store.byte_index());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_verbs_are_feed_post_and_read() {
+        let names: Vec<_> = Cli::command()
+            .get_subcommands()
+            .map(|command| command.get_name().to_string())
+            .collect();
+        assert!(names.contains(&"feed".to_string()));
+        assert!(names.contains(&"post".to_string()));
+        assert!(names.contains(&"read".to_string()));
+        for gone in ["suggest", "room", "toc", "select", "seed", "serve"] {
+            assert!(!names.iter().any(|name| name == gone), "{names:?}");
+        }
+    }
+
+    #[test]
+    fn retired_verbs_do_not_parse() {
+        for args in [
+            vec!["lanes", "suggest", "--text", "ferns"],
+            vec!["lanes", "room", "--coord", "1.1.1/1.1.1"],
+            vec!["lanes", "toc"],
+            vec!["lanes", "select", "--coord", "1.2.1/1.1.1/1.1.2"],
+            vec!["lanes", "seed"],
+            vec!["lanes", "serve"],
+        ] {
+            assert!(Cli::try_parse_from(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn the_old_commands_are_flags() {
+        let seeded = Cli::try_parse_from(["lanes", "--seed"]).unwrap();
+        assert!(seeded.seed);
+        assert!(seeded.command.is_none());
+
+        let feed = Cli::try_parse_from(["lanes", "feed", "--user", "casey", "--details"]).unwrap();
+        assert_eq!(feed.user.as_deref(), Some("casey"));
+        assert!(feed.details);
+        assert!(matches!(feed.command, Some(Command::Feed)));
+
+        let preview = Cli::try_parse_from([
+            "lanes",
+            "post",
+            "--text",
+            "The ferns need shade",
+            "--preview",
+        ])
+        .unwrap();
+        match preview.command {
+            Some(Command::Post {
+                text,
+                preview,
+                coord,
+            }) => {
+                assert_eq!(text, "The ferns need shade");
+                assert!(preview);
+                assert!(coord.is_none());
+            }
+            other => panic!("expected post, got {other:?}"),
+        }
+
+        let scroll =
+            Cli::try_parse_from(["lanes", "read", "--scroll", "1.2.1/1.1.1/1.1.2"]).unwrap();
+        match scroll.command {
+            Some(Command::Read {
+                scroll: Some(coord),
+                index,
+                ..
+            }) => {
+                assert_eq!(coord, "1.2.1/1.1.1/1.1.2");
+                assert!(!index);
+            }
+            other => panic!("expected read --scroll, got {other:?}"),
+        }
+
+        let index = Cli::try_parse_from(["lanes", "read", "--index"]).unwrap();
+        assert!(matches!(
+            index.command,
+            Some(Command::Read { index: true, .. })
+        ));
+
+        let titled = Cli::try_parse_from(["lanes", "read", "Fern wall"]).unwrap();
+        match titled.command {
+            Some(Command::Read {
+                query: Some(title), ..
+            }) => assert_eq!(title, "Fern wall"),
+            other => panic!("expected a title, got {other:?}"),
+        }
+    }
 }

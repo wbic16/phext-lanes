@@ -550,3 +550,19 @@ struct TocThread {
     title: String,
     messages: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_page_is_one_feed_and_a_compose_box() {
+        let page = include_str!("../static/index.html");
+        assert!(page.contains("Posting to:"));
+        assert!(page.contains("more held"));
+        assert!(page.contains("id=\"details\""));
+        assert!(page.contains("id=\"text\""));
+        assert!(!page.contains("Coordinate map"));
+        assert!(!page.contains("lane-banner"));
+        assert!(!page.contains("class=\"spine\""));
+        assert!(!page.contains("class=\"pages\""));
+    }
+}

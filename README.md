@@ -23,14 +23,30 @@ The cast is fictional: Mira Quill, Jules Fen, Ada North, Ren Sato, and Casey Hor
 
 On a narrow screen the same three surfaces are tabs: Feed, Map, Room.
 
-## Run
+## Quickstart
+
+Clone the repo, then start the reading room from the project root. The first run writes `data/chat.phext`. The server listens on port **7841**.
 
 ```bash
+git clone <repo-url> lanes
+cd lanes
 cargo run
-# http://127.0.0.1:7841
 ```
 
-The listen port defaults to **7841**. The phext path defaults to `data/chat.phext`.
+Open [http://127.0.0.1:7841](http://127.0.0.1:7841).
+
+A few CLI examples, using the same file:
+
+```bash
+cargo run -- feed --user mira
+cargo run -- room --coord 1.1.1/1.1.1
+cargo run -- suggest --user mira --text "The ferns on the north wall need more shade"
+cargo run -- post --author mira --text "The moss tray can stay another week."
+cargo run -- toc
+cargo run -- select --coord 1.2.1/1.1.1/1.1.2
+```
+
+Override the port or the phext path, or run the tests:
 
 ```bash
 cargo run -- --port 7841 --file data/chat.phext
@@ -153,3 +169,7 @@ There is no model. The draft is split into words, a trailing "s" is stripped (`f
 ## Tests
 
 `cargo test` covers coordinate parsing (including the semicolon form), the nine phext break codes, distance weights, the score ordering (a stale subscribed thread beats a brand-new far one), the loud-author cap, keyword prediction, a new-book suggestion, `insert` / `fetch` / `textmap` roundtrips, a scroll inserted between two existing coordinates, rejection of an injected `0x17`, and the seeded cast: Mira opens on Fern wall, Casey opens on the Hall but still sees the quiet voices, and the Hall is flooded while his lane holds the rest.
+
+## License
+
+MIT. Copyright (c) 2026 Will Bickford. See [LICENSE](LICENSE).

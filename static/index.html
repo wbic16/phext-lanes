@@ -12,11 +12,30 @@
 <meta property="og:url" content="%%OG_URL%%">
 <style>
   :root {
+    color-scheme: light;
     --ink: #221f1b;
     --muted: #7a736a;
     --faint: #9a9288;
     --paper: #f4f1ea;
     --line: #e6e0d6;
+    --preview: #4a453f;
+    --mark: #efe6d4;
+    --dock: rgba(244, 241, 234, 0.94);
+    --danger: #8a3a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --ink: #e4ddd2;
+      --muted: #a89f94;
+      --faint: #877f74;
+      --paper: #161411;
+      --line: #3a342c;
+      --preview: #c9bfb2;
+      --mark: #2a261f;
+      --dock: rgba(22, 20, 17, 0.94);
+      --danger: #e0a090;
+    }
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
@@ -108,7 +127,7 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    color: #4a453f;
+    color: var(--preview);
   }
   .meta, .coord { display: none; }
   body.details .meta { display: block; }
@@ -121,7 +140,7 @@
   .reading { padding: 0.25rem 0 0.5rem; }
   .msg { margin: 1.35rem 0 1.5rem; }
   .msg.mark {
-    background: #efe6d4;
+    background: var(--mark);
     border-radius: 2px;
     margin-left: -0.55rem;
     margin-right: -0.55rem;
@@ -163,7 +182,7 @@
     left: 0;
     right: 0;
     bottom: 0;
-    background: rgba(244, 241, 234, 0.94);
+    background: var(--dock);
     border-top: 1px solid var(--line);
   }
   .dock-inner { max-width: 38rem; margin: 0 auto; padding: 0.85rem 1.5rem 1rem; }
@@ -179,7 +198,7 @@
   .hint, .status { margin: 0.15rem 0 0; font-size: 0.92rem; }
   .hint { color: var(--muted); }
   .status { min-height: 1.2em; color: var(--ink); }
-  .status.error { color: #8a3a2a; }
+  .status.error { color: var(--danger); }
   .picker { display: flex; flex-wrap: wrap; gap: 0.45rem 1rem; margin: 0 0 0.7rem; }
   .picker button {
     background: transparent;
@@ -252,6 +271,8 @@ const state = {
   suggestGen: 0,
   timer: 0,
   feedShown: 40,
+  tocKey: "",
+  tocText: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -694,7 +715,18 @@ async function loadLane(id, offset) {
   } else {
     state.room = body;
   }
-  if (state.data) renderFeed(state.data.feed);
+  if (state.data) paintReading();
+}
+
+function paintReading() {
+  if (!state.data) return;
+  const openRow = [...document.querySelectorAll("#feed .row")].find((row) => row.getAttribute("aria-expanded") === "true");
+  const reading = openRow && openRow.closest(".item") && openRow.closest(".item").querySelector(".reading");
+  if (!reading || !state.room || state.room.thread !== state.open) {
+    renderFeed(state.data.feed);
+    return;
+  }
+  fillReading(reading);
 }
 
 async function loadMorePosts() {
@@ -721,16 +753,18 @@ function renderExtra() {
     reset.addEventListener("click", () => resetDemo(reset));
     host.append(reset);
   }
+  const tocKey = (data.fabric || "") + ":" + state.loadGen;
+  if (state.tocKey === tocKey && state.tocText) {
+    host.append(el("pre", { id: "toc", text: state.tocText }));
+    return;
+  }
   host.append(el("pre", { id: "toc", text: "Loading…" }));
   fetch(api("/api/toc")).then((res) => res.json()).then((body) => {
+    const lines = body.error ? body.error : body.threads.map((thread) => thread.thread + "  " + thread.title).join("\n") + "\n\n" + body.textmap;
+    state.tocKey = tocKey;
+    state.tocText = lines;
     const toc = $("toc");
-    if (!toc) return;
-    if (body.error) {
-      toc.textContent = body.error;
-      return;
-    }
-    const lines = body.threads.map((thread) => thread.thread + "  " + thread.title);
-    toc.textContent = lines.join("\n") + "\n\n" + body.textmap;
+    if (toc) toc.textContent = lines;
   }).catch(() => {
     const toc = $("toc");
     if (toc) toc.textContent = "Could not read the file.";

@@ -4,7 +4,7 @@
 //! [`phext::fetch`]. The table of contents is [`phext::textmap`], and the
 //! byte index is [`phext::index`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -145,6 +145,10 @@ pub struct Placed {
 pub struct Store {
     path: PathBuf,
     doc: String,
+    /// Parsed once per save, then reused. A read does not scan the phext again.
+    world: World,
+    /// Coordinates that hold text, from the same pass as `world`.
+    filled: BTreeSet<Coordinate>,
 }
 
 impl Store {
@@ -153,13 +157,10 @@ impl Store {
         if path.exists() {
             let doc = fs::read_to_string(&path)?;
             if !doc.trim().is_empty() {
-                return Ok(Store { path, doc });
+                return Ok(Store::from_doc(path, doc));
             }
         }
-        let mut store = Store {
-            path,
-            doc: String::new(),
-        };
+        let mut store = Store::from_doc(path, String::new());
         store.reseed(Utc::now())?;
         Ok(store)
     }
@@ -180,20 +181,22 @@ impl Store {
         if doc.trim().is_empty() {
             return Err(Error::Bad("fabric is empty".into()));
         }
-        let _ = phext::explode(&doc);
-        let _ = world_from(&doc);
-        Ok(Store { path, doc })
+        Ok(Store::from_doc(path, doc))
     }
 
     pub fn from_doc(path: impl Into<PathBuf>, doc: String) -> Self {
+        let (world, filled) = indexed(&doc);
         Store {
             path: path.into(),
             doc,
+            world,
+            filled,
         }
     }
 
-    pub fn world(&self) -> World {
-        world_from(&self.doc)
+    /// The parsed fabric. Rebuilt only when the file changes.
+    pub fn world(&self) -> &World {
+        &self.world
     }
 
     /// `phext::fetch`
@@ -254,19 +257,25 @@ impl Store {
             return Err(Error::Bad("coordinate is out of range".into()));
         }
         let anchor = thread_anchor(requested);
-        let world = world_from(&self.doc);
-        let existing = world
+        let existing = self
+            .world
             .threads
             .iter()
             .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(anchor))
             .cloned();
         let new_thread = existing.is_none();
-
+        let shelf_topic = self
+            .world
+            .threads
+            .iter()
+            .find(|thread| topic_key(thread.coord) == topic_key(anchor))
+            .map(|thread| thread.topic.clone());
+        let anchor_taken = self.filled.contains(&anchor);
         let coord = match post.target {
-            Target::Scroll(wanted) if !is_card_slot(wanted) && !occupied(&self.doc, wanted) => {
+            Target::Scroll(wanted) if !is_card_slot(wanted) && !self.filled.contains(&wanted) => {
                 wanted
             }
-            _ => next_free(&self.doc, anchor),
+            _ => next_free(&self.filled, anchor),
         };
         if !coord.validate_coordinate() {
             return Err(Error::Bad("that thread has no free scroll left".into()));
@@ -276,14 +285,9 @@ impl Store {
         let (title, topic) = if let Some(thread) = existing {
             (thread.title, thread.topic)
         } else {
-            let topic = world
-                .threads
-                .iter()
-                .find(|thread| topic_key(thread.coord) == topic_key(anchor))
-                .map(|thread| thread.topic.clone())
-                .unwrap_or_else(|| format!("Shelf {}", topic_key(anchor)));
+            let topic = shelf_topic.unwrap_or_else(|| format!("Shelf {}", topic_key(anchor)));
             let title = model::title_from_text(&text);
-            if !occupied(&doc, anchor) {
+            if !anchor_taken {
                 let card = model::format_card(&topic, &title, &model::keyword_line(&text));
                 doc = phext::insert(doc, anchor, &card);
             }
@@ -322,18 +326,44 @@ impl Store {
         fs::write(&tmp, &doc)?;
         fs::rename(&tmp, &self.path)?;
         self.doc = doc;
+        let (world, filled) = indexed(&self.doc);
+        self.world = world;
+        self.filled = filled;
         Ok(())
     }
 }
 
-pub fn world_from(doc: &str) -> World {
+/// One scan of the phext: the reader world, and every coordinate that has text.
+fn indexed(doc: &str) -> (World, BTreeSet<Coordinate>) {
     if doc.is_empty() {
+        return (
+            World {
+                users: Vec::new(),
+                threads: Vec::new(),
+            },
+            BTreeSet::new(),
+        );
+    }
+    let map = phext::explode(doc);
+    let filled = map
+        .iter()
+        .filter(|(_, raw)| !raw.trim().is_empty())
+        .map(|(coord, _)| *coord)
+        .collect();
+    (world_from_map(&map), filled)
+}
+
+pub fn world_from(doc: &str) -> World {
+    indexed(doc).0
+}
+
+fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World {
+    if map.is_empty() {
         return World {
             users: Vec::new(),
             threads: Vec::new(),
         };
     }
-    let map = phext::explode(doc);
     let mut coords: Vec<Coordinate> = map.keys().copied().collect();
     coords.sort();
 
@@ -439,23 +469,15 @@ pub fn world_from(doc: &str) -> World {
     World { users, threads }
 }
 
-fn occupied(doc: &str, coord: Coordinate) -> bool {
-    phext::explode(doc)
-        .get(&coord)
-        .map(|raw| !raw.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn next_free(doc: &str, anchor: Coordinate) -> Coordinate {
-    let used = phext::explode(doc)
-        .into_iter()
-        .filter(|(coord, raw)| {
-            thread_key(*coord) == thread_key(anchor)
+fn next_free(filled: &BTreeSet<Coordinate>, anchor: Coordinate) -> Coordinate {
+    let used = filled
+        .iter()
+        .filter(|coord| {
+            thread_key(**coord) == thread_key(anchor)
                 && coord.x.chapter == 1
                 && coord.x.section == 1
-                && !raw.trim().is_empty()
         })
-        .map(|(coord, _)| coord.x.scroll);
+        .map(|coord| coord.x.scroll);
     coord::with_scroll(anchor, coord::next_message_scroll(used))
 }
 

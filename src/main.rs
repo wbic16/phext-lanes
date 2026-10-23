@@ -186,20 +186,27 @@ fn post(
     preview: bool,
     details: bool,
 ) -> Result<(), Error> {
-    let world = store.world();
-    let reader = require_user(&world, &settings.user)?;
-    let interests = reader.interests.clone();
-    let author = reader.name.clone();
-    if preview {
-        print_destination(&world, &interests, text, coord, details)?;
-        return Ok(());
-    }
-    let target = match coord {
-        Some(coord) => parse_target(coord).map_err(Error::from)?,
-        None => {
-            let suggestion = rank::suggest(&world.threads, &interests, text, Utc::now());
-            Target::Scroll(suggestion.coord)
+    let prepared = {
+        let world = store.world();
+        let reader = require_user(world, &settings.user)?;
+        let interests = reader.interests.clone();
+        let author = reader.name.clone();
+        if preview {
+            print_destination(world, &interests, text, coord, details)?;
+            None
+        } else {
+            let target = match coord {
+                Some(coord) => parse_target(coord).map_err(Error::from)?,
+                None => {
+                    let suggestion = rank::suggest(&world.threads, &interests, text, Utc::now());
+                    Target::Scroll(suggestion.coord)
+                }
+            };
+            Some((author, target))
         }
+    };
+    let Some((author, target)) = prepared else {
+        return Ok(());
     };
     let placed = store.place(Post {
         author,

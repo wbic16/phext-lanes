@@ -407,20 +407,24 @@ struct PostBody {
 fn post_message(app: &AppState, fabric: Option<&str>, body: &[u8]) -> Result<PostOut, AppError> {
     let body: PostBody = serde_json::from_slice(body).map_err(|_| AppError::bad("bad json"))?;
     app.hub.with_store(fabric, |store| {
-        let world = store.world();
-        let user = resolve_user(&world, Some(&body.user))?.clone();
-        let target = if let Some(coord) = body
-            .coord
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            parse_target(coord).map_err(AppError::bad)?
-        } else {
-            let suggestion = rank::suggest(&world.threads, &user.interests, &body.text, Utc::now());
-            Target::Scroll(suggestion.coord)
+        let (author, target) = {
+            let world = store.world();
+            let user = resolve_user(world, Some(&body.user))?.clone();
+            let target = if let Some(coord) = body
+                .coord
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                parse_target(coord).map_err(AppError::bad)?
+            } else {
+                let suggestion =
+                    rank::suggest(&world.threads, &user.interests, &body.text, Utc::now());
+                Target::Scroll(suggestion.coord)
+            };
+            (user.name, target)
         };
         let placed = store.place(Post {
-            author: user.name,
+            author,
             text: body.text,
             target,
             now: Utc::now(),
@@ -1279,6 +1283,8 @@ mod tests {
         assert!(!page.contains("class=\"spine\""));
         assert!(!page.contains("class=\"pages\""));
         assert!(page.contains("Nothing in this phext yet."));
+        assert!(page.contains("prefers-color-scheme: dark"));
+        assert!(page.contains("color-scheme: dark"));
     }
 }
 

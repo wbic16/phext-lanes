@@ -236,10 +236,12 @@ pub fn roster_only() -> String {
 
 pub fn lane_document(doc: &str, thread: &Thread) -> String {
     let mut out = String::new();
-    let anchor = crate::coord::thread_anchor(thread.coord);
-    let card = phext::fetch(doc, anchor);
-    if !card.trim().is_empty() {
-        out = phext::insert(out, anchor, &card);
+    if !thread.plain {
+        let anchor = crate::coord::thread_anchor(thread.coord);
+        let card = phext::fetch(doc, anchor);
+        if !card.trim().is_empty() {
+            out = phext::insert(out, anchor, &card);
+        }
     }
     for message in &thread.messages {
         let raw = phext::fetch(doc, message.coord);

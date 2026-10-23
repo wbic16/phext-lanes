@@ -125,6 +125,7 @@ mod tests {
             author: "Mira Quill".into(),
             ts: now() - Duration::minutes(5),
             text: text.into(),
+            plain: false,
         }
     }
 

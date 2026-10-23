@@ -120,13 +120,19 @@ pub fn build_feed(
     let cap = cap.max(1);
     let mut volume: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for thread in threads {
+        if thread.plain {
+            continue;
+        }
         for message in &thread.messages {
+            if message.plain {
+                continue;
+            }
             *volume.entry(message.author.as_str()).or_default() += 1;
         }
     }
     let mut ranked: Vec<&Thread> = threads
         .iter()
-        .filter(|thread| !thread.messages.is_empty())
+        .filter(|thread| !thread.plain && thread.messages.iter().any(|message| !message.plain))
         .collect();
     ranked.sort_by(|a, b| {
         let score_a = thread_score(coord::min_distance(a.coord, interests), newest_age(a, now));
@@ -154,6 +160,9 @@ pub fn build_feed(
         let mut admitted = Vec::new();
         let mut held = Vec::new();
         for message in messages {
+            if message.plain {
+                continue;
+            }
             let limit = if volume.get(message.author.as_str()).copied().unwrap_or(0) >= LOUD_AT {
                 cap
             } else {
@@ -277,6 +286,9 @@ pub fn suggest(
 
     let mut best: Option<Candidate> = None;
     for thread in threads {
+        if thread.plain {
+            continue;
+        }
         let bag = thread_bag(thread);
         let mut overlap: Vec<String> = tokens.intersection(&bag).cloned().collect();
         overlap.sort();
@@ -367,7 +379,7 @@ fn existing_or_fresh(
     if !force_new {
         if let Some(thread) = threads
             .iter()
-            .find(|thread| thread_key(thread.coord) == thread_key(home))
+            .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(home))
         {
             return Suggestion {
                 coord: next_on(thread),
@@ -397,8 +409,10 @@ fn home_thread(threads: &[Thread], interests: &[Coordinate]) -> Coordinate {
         return coord::thread_anchor(*coord);
     }
     threads
-        .first()
-        .map(|thread| thread.coord)
+        .iter()
+        .find(|thread| !thread.plain)
+        .or_else(|| threads.first())
+        .map(|thread| coord::thread_anchor(thread.coord))
         .unwrap_or_else(libphext::phext::default_coordinate)
 }
 
@@ -488,6 +502,7 @@ mod tests {
             author: author.into(),
             ts: now - Duration::minutes(minutes_ago),
             text: text.into(),
+            plain: false,
         }
     }
 
@@ -498,6 +513,7 @@ mod tests {
             title: title.into(),
             keywords: keywords.into(),
             messages,
+            plain: false,
         }
     }
 
@@ -699,5 +715,42 @@ mod tests {
         assert_eq!(thread_key(suggestion.thread), "1.2.1/1.1.2");
         assert_eq!(format_coord(suggestion.coord), "1.2.1/1.1.2/1.1.2");
         assert!(suggestion.overlap.is_empty());
+    }
+
+    #[test]
+    fn plain_scrolls_do_not_spend_the_author_cap() {
+        let now = fixed();
+        let interest = parse_coord("1.1.1/1.1.1/1.1.1").unwrap();
+        let mut prose = thread(
+            "1.1.1/1.1.1/1.1.1",
+            "Incipit (It Begins)",
+            "",
+            (1..=12)
+                .map(|scroll| {
+                    message(
+                        &format!("1.1.1/1.1.1/1.1.{scroll}"),
+                        "phext",
+                        scroll,
+                        "a scroll",
+                        now,
+                    )
+                })
+                .collect(),
+        );
+        prose.plain = true;
+        for message in &mut prose.messages {
+            message.plain = true;
+        }
+        let chat = thread(
+            "1.2.1/1.1.1/1.1.1",
+            "Fern wall",
+            "",
+            vec![message("1.2.1/1.1.1/1.1.2", "Mira Quill", 3, "ferns", now)],
+        );
+        let feed = build_feed(&[prose, chat], &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        assert_eq!(feed.threads.len(), 1);
+        assert_eq!(feed.threads[0].title, "Fern wall");
+        assert!(feed.lanes.is_empty());
+        assert_eq!(admitted_by(&feed, "phext"), 0);
     }
 }

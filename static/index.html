@@ -134,7 +134,9 @@
     color: var(--muted);
     font-size: 0.95rem;
   }
-  .empty { margin: 0; color: var(--muted); }
+  .empty { margin: 0.75rem 0 0; color: var(--muted); }
+  .post-title { margin: 0 0 0.35rem; font-weight: 600; }
+  .more { display: inline-block; margin: 0.35rem 0 1.25rem; }
   .extra {
     margin: 2.5rem 0 0;
     color: var(--muted);
@@ -249,6 +251,7 @@ const state = {
   loadGen: 0,
   suggestGen: 0,
   timer: 0,
+  feedShown: 40,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -343,7 +346,7 @@ function render() {
 }
 
 function visibleThreads(threads) {
-  const list = threads.slice();
+  const list = (threads || []).slice();
   if (state.room && state.open && !list.some((thread) => thread.thread === state.open)) {
     const marked = state.highlight
       ? state.room.messages.find((message) => message.id === state.highlight)
@@ -359,9 +362,22 @@ function visibleThreads(threads) {
       score: 0,
       messages: message ? [message] : [],
       held: [],
+      plain: Boolean(state.room.plain),
     });
   }
   return list;
+}
+
+function openingLine(text) {
+  const line = String(text || "").split("\n").find((item) => item.trim());
+  return line ? line.trim() : "";
+}
+
+function restAfter(text) {
+  const lines = String(text || "").split("\n");
+  const index = lines.findIndex((item) => item.trim());
+  if (index < 0) return "";
+  return lines.slice(index + 1).join("\n").trim();
 }
 
 function renderFeed(threads) {
@@ -369,13 +385,20 @@ function renderFeed(threads) {
   feed.replaceChildren();
   const list = visibleThreads(threads);
   if (!list.length) {
-    feed.append(el("p", { class: "empty", text: "Nothing here yet." }));
+    feed.append(el("p", { class: "empty", text: "Nothing in this phext yet." }));
     return;
   }
-  for (const thread of list) {
+  const limit = state.feedShown || 40;
+  let shown = list.slice(0, limit);
+  if (state.open) {
+    const open = list.find((thread) => thread.thread === state.open);
+    if (open && !shown.some((thread) => thread.thread === state.open)) shown = [open].concat(shown);
+  }
+  for (const thread of shown) {
     const item = el("article", { class: "item" });
     const message = thread.messages[0];
-    const preview = message ? message.author + ": " + (message.preview || message.text) : "";
+    const named = message && message.author && message.author !== "phext" && !thread.plain;
+    const preview = message ? (named ? message.author + ": " : "") + (message.preview || message.text) : "";
     const row = el("button", {
       type: "button",
       class: "row",
@@ -409,12 +432,25 @@ function renderFeed(threads) {
         class: "meta",
         text: thread.thread + " · " + thread.nearness + " · distance " + thread.distance + " · score " + thread.score.toFixed(2),
       }));
+    } else if (thread.plain) {
+      item.append(el("p", { class: "meta", text: thread.thread }));
     }
     const reading = el("div", { class: "reading" });
     if (state.open === thread.thread) fillReading(reading);
     else reading.hidden = true;
     item.append(reading);
     feed.append(item);
+  }
+  if (list.length > limit) {
+    feed.append(el("button", {
+      type: "button",
+      class: "texty more",
+      text: "more",
+      onclick: () => {
+        state.feedShown = (state.feedShown || 40) + 40;
+        renderFeed(state.data.feed);
+      },
+    }));
   }
   if (state.scrollToMark) {
     const marked = feed.querySelector(".msg.mark");
@@ -433,23 +469,45 @@ function fillReading(host) {
   }
   if (room.thread !== state.open) return;
   for (const message of room.messages) {
-    const by = el("p", { class: "by" });
-    by.append(message.author + " ");
-    by.append(el("button", {
+    const plain = Boolean(room.plain) || message.author === "phext";
+    const marked = state.highlight === message.id;
+    const link = el("button", {
       type: "button",
       class: "copylink",
       text: "link",
       "aria-label": "Copy link to this message",
       onclick: (event) => copyPath(event, "/p/" + message.id),
-    }));
-    by.append(el("span", { class: "coord", text: message.coord }));
-    const marked = state.highlight === message.id;
+    });
+    const coord = el("span", { class: "coord", text: message.coord });
+    let body;
+    if (plain) {
+      const title = el("p", { class: "post-title", text: openingLine(message.text) || "Scroll" });
+      title.append(" ");
+      title.append(link);
+      title.append(coord);
+      const rest = restAfter(message.text);
+      body = [title, rest ? el("p", { text: rest }) : null];
+    } else {
+      const by = el("p", { class: "by" });
+      by.append(message.author + " ");
+      by.append(link);
+      by.append(coord);
+      body = [by, el("p", { text: message.text })];
+    }
     host.append(el("article", {
       class: marked ? "msg mark" : "msg",
       id: marked ? "marked" : null,
-    }, [by, el("p", { text: message.text })]));
+    }, body));
   }
   if (!room.messages.length) host.append(el("p", { class: "empty", text: "Nothing in this thread yet." }));
+  if (room.more) {
+    host.append(el("button", {
+      type: "button",
+      class: "texty more",
+      text: "more",
+      onclick: () => loadMorePosts().catch((err) => setStatus(err.message, true)),
+    }));
+  }
 }
 
 function routeFromPath() {
@@ -580,7 +638,7 @@ async function toggleThread(thread) {
   state.room = null;
   if (thread.id) go("/l/" + thread.id);
   render();
-  await loadRoom(thread.thread);
+  await loadLane(thread.id, 0);
 }
 
 async function openLinked(route) {
@@ -616,16 +674,34 @@ async function applyRoute() {
   await openLinked(route);
 }
 
-async function loadRoom(thread) {
-  const res = await fetch(api("/api/room?thread=" + encodeURIComponent(thread)));
-  const body = await res.json();
-  if (state.open !== thread) return;
+async function loadLane(id, offset) {
+  if (!id) return;
+  const open = state.open;
+  const res = await fetch(api("/api/l/" + encodeURIComponent(id) + "?offset=" + String(offset || 0)));
+  const body = await res.json().catch(() => ({}));
+  if (state.open !== open) return;
   if (!res.ok) {
     setStatus(body.error || "Could not open that thread", true);
     return;
   }
-  state.room = body;
-  renderFeed(state.data.feed);
+  if (offset && state.room && state.room.id === body.id) {
+    const seen = new Set(state.room.messages.map((message) => message.id));
+    for (const message of body.messages || []) {
+      if (!seen.has(message.id)) state.room.messages.push(message);
+    }
+    state.room.more = Boolean(body.more);
+    state.room.message_count = body.message_count;
+  } else {
+    state.room = body;
+  }
+  if (state.data) renderFeed(state.data.feed);
+}
+
+async function loadMorePosts() {
+  const room = state.room;
+  if (!room || !room.more || !room.id) return;
+  const offset = (room.offset || 0) + room.messages.length;
+  await loadLane(room.id, offset);
 }
 
 function renderExtra() {
@@ -730,7 +806,7 @@ async function place(event) {
   setStatus("Posted to " + body.title + ".", false);
   await loadState();
   if (routeFromPath()) await applyRoute();
-  else if (state.open) await loadRoom(state.open);
+  else if (state.room && state.room.id) await loadLane(state.room.id, 0);
   await runSuggest();
 }
 
@@ -831,7 +907,8 @@ loadState()
   .then(() => applyRoute())
   .then(() => runSuggest())
   .catch((err) => {
-    $("feed").replaceChildren(el("p", { class: "empty", text: err.message }));
+    if (!state.data) $("feed").replaceChildren(el("p", { class: "empty", text: err.message }));
+    else setStatus(err.message, true);
   });
 </script>
 </body>

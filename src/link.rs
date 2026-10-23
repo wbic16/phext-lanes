@@ -5,13 +5,17 @@
 //! restart, a redeploy, or a reseed of the demo. The encoding is frozen:
 //! a leading `k`, then the base-36 form of the address packed in base 1000.
 //! Lane ids use the six thread parts. Post ids use all nine, including the
-//! scroll. Do not change the alphabet, the radix, or the prefix.
+//! scroll. A section of ordinary text uses the same alphabet and radix with
+//! an `s` prefix and eight parts (the thread, plus chapter and section), so
+//! it never shares an id with a chat lane. Do not change the alphabet, the
+//! radix, or the `k` prefix.
 
 use libphext::phext::Coordinate;
 
-use crate::coord::{parse_coord, thread_anchor};
+use crate::coord::{parse_coord, section_anchor, thread_anchor};
 
 const PREFIX: char = 'k';
+const SECTION_PREFIX: char = 's';
 const RADIX: u128 = 1000;
 const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
@@ -23,10 +27,24 @@ pub fn post_id(coord: Coordinate) -> String {
     encode(&post_parts(coord)).expect("post coordinate is in range")
 }
 
+/// Stable id for one chapter and section. Prefix `s`, eight coordinate parts.
+pub fn section_lane_id(coord: Coordinate) -> String {
+    encode_prefixed(SECTION_PREFIX, &section_parts(coord)).expect("section coordinate is in range")
+}
+
 pub fn parse_lane_id(id: &str) -> Option<Coordinate> {
     let parts = decode(id, 6)?;
     let coord = coord_from(&parts)?;
     Some(thread_anchor(coord))
+}
+
+pub fn parse_section_lane_id(id: &str) -> Option<Coordinate> {
+    let parts = decode_prefixed(SECTION_PREFIX, id, 8)?;
+    let coord = section_anchor(coord_from(&parts)?);
+    if section_lane_id(coord) != id {
+        return None;
+    }
+    Some(coord)
 }
 
 pub fn parse_post_id(id: &str) -> Option<Coordinate> {
@@ -42,6 +60,20 @@ fn lane_parts(coord: Coordinate) -> [usize; 6] {
         coord.y.collection,
         coord.y.volume,
         coord.y.book,
+    ]
+}
+
+fn section_parts(coord: Coordinate) -> [usize; 8] {
+    let lane = lane_parts(coord);
+    [
+        lane[0],
+        lane[1],
+        lane[2],
+        lane[3],
+        lane[4],
+        lane[5],
+        coord.x.chapter,
+        coord.x.section,
     ]
 }
 
@@ -61,6 +93,10 @@ fn post_parts(coord: Coordinate) -> [usize; 9] {
 }
 
 fn encode(parts: &[usize]) -> Option<String> {
+    encode_prefixed(PREFIX, parts)
+}
+
+fn encode_prefixed(prefix: char, parts: &[usize]) -> Option<String> {
     let mut packed = 0u128;
     for part in parts {
         if !(1..=1000).contains(part) {
@@ -70,11 +106,15 @@ fn encode(parts: &[usize]) -> Option<String> {
             .checked_mul(RADIX)?
             .checked_add((*part - 1) as u128)?;
     }
-    Some(format!("{PREFIX}{}", base36(packed)))
+    Some(format!("{prefix}{}", base36(packed)))
 }
 
 fn decode(id: &str, len: usize) -> Option<Vec<usize>> {
-    let body = id.strip_prefix(PREFIX)?;
+    decode_prefixed(PREFIX, id, len)
+}
+
+fn decode_prefixed(prefix: char, id: &str, len: usize) -> Option<Vec<usize>> {
+    let body = id.strip_prefix(prefix)?;
     if body.is_empty() || body.len() > 40 || !canonical(body) {
         return None;
     }
@@ -139,7 +179,7 @@ fn coord_from(parts: &[usize]) -> Option<Coordinate> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::coord::parse_coord;
+    use crate::coord::{parse_coord, section_anchor};
     use crate::model::Message;
     use crate::seed;
     use crate::store::world_from;
@@ -156,6 +196,25 @@ mod tests {
         assert_eq!(lane_id(at("1.2.1/1.2.1/1.1.1")), "kcre66j1k");
         assert_eq!(post_id(at("1.1.1/1.1.1/1.1.2")), "k1");
         assert_eq!(post_id(at("1.2.1/1.1.1/1.1.2")), "k5v1j4f4ds79m9t");
+        assert_eq!(section_lane_id(at("1.1.1/1.1.1/1.1.1")), "s0");
+    }
+
+    #[test]
+    fn section_ids_roundtrip_without_taking_a_chat_lane() {
+        let fern = at("1.2.1/1.1.1/1.1.1");
+        let section = section_lane_id(fern);
+        assert_ne!(section, lane_id(fern));
+        assert_eq!(parse_section_lane_id(&section), Some(section_anchor(fern)));
+        assert!(parse_section_lane_id("kcre66i9s").is_none());
+        assert!(parse_section_lane_id("k0").is_none());
+        assert!(parse_lane_id("s0").is_none());
+        let chapter = at("1.1.1/1.1.1/2.1.3");
+        let id = section_lane_id(chapter);
+        let parsed = parse_section_lane_id(&id).unwrap();
+        assert_eq!(parsed.x.chapter, 2);
+        assert_eq!(parsed.x.section, 1);
+        assert_eq!(parsed.x.scroll, 1);
+        assert_ne!(id, lane_id(chapter));
     }
 
     #[test]

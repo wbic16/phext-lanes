@@ -12,7 +12,8 @@ use chrono::{DateTime, Utc};
 use libphext::phext::{self, Coordinate};
 
 use crate::coord::{
-    self, format_coord, is_card_slot, is_roster, thread_anchor, thread_key, topic_key, Target,
+    self, format_coord, is_card_slot, is_roster, section_anchor, section_key, thread_anchor,
+    thread_key, topic_key, Target,
 };
 use crate::error::Error;
 use crate::model::{self, Message, Scroll, Thread, User};
@@ -36,23 +37,48 @@ impl World {
     pub fn thread(&self, key: &str) -> Option<&Thread> {
         self.threads
             .iter()
-            .find(|thread| thread_key(thread.coord) == key)
+            .find(|thread| !thread.plain && thread_key(thread.coord) == key)
+            .or_else(|| {
+                self.threads
+                    .iter()
+                    .find(|thread| thread_key(thread.coord) == key)
+            })
     }
 
     pub fn find_lane(&self, id: &str) -> Option<&Thread> {
+        if let Some(coord) = crate::link::parse_section_lane_id(id) {
+            let key = section_key(coord);
+            return self
+                .threads
+                .iter()
+                .find(|thread| thread.plain && section_key(thread.coord) == key);
+        }
         let coord = crate::link::parse_lane_id(id)?;
-        self.thread(&thread_key(coord))
+        if let Some(thread) = self
+            .threads
+            .iter()
+            .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(coord))
+        {
+            return Some(thread);
+        }
+        self.threads.iter().find(|thread| {
+            thread.plain
+                && thread.coord.x.chapter == 1
+                && thread.coord.x.section == 1
+                && thread_key(thread.coord) == thread_key(coord)
+        })
     }
 
     /// The message scroll named by a post id. The thread card is not a post.
     pub fn find_post(&self, id: &str) -> Option<(&Thread, &Message)> {
         let coord = crate::link::parse_post_id(id)?;
-        let thread = self.thread(&thread_key(coord))?;
-        let message = thread
-            .messages
-            .iter()
-            .find(|message| message.coord == coord)?;
-        Some((thread, message))
+        self.threads.iter().find_map(|thread| {
+            thread
+                .messages
+                .iter()
+                .find(|message| message.coord == coord)
+                .map(|message| (thread, message))
+        })
     }
 
     /// A thread title, or a thread or scroll coordinate.
@@ -65,6 +91,15 @@ impl World {
             let coord = match target {
                 Target::Thread(coord) | Target::Scroll(coord) => coord,
             };
+            if matches!(target, Target::Scroll(_)) {
+                if let Some(thread) = self
+                    .threads
+                    .iter()
+                    .find(|thread| thread.messages.iter().any(|message| message.coord == coord))
+                {
+                    return Ok(thread);
+                }
+            }
             let key = thread_key(coord);
             return self
                 .thread(&key)
@@ -220,7 +255,11 @@ impl Store {
         }
         let anchor = thread_anchor(requested);
         let world = world_from(&self.doc);
-        let existing = world.thread(&thread_key(anchor)).cloned();
+        let existing = world
+            .threads
+            .iter()
+            .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(anchor))
+            .cloned();
         let new_thread = existing.is_none();
 
         let coord = match post.target {
@@ -244,8 +283,10 @@ impl Store {
                 .map(|thread| thread.topic.clone())
                 .unwrap_or_else(|| format!("Shelf {}", topic_key(anchor)));
             let title = model::title_from_text(&text);
-            let card = model::format_card(&topic, &title, &model::keyword_line(&text));
-            doc = phext::insert(doc, anchor, &card);
+            if !occupied(&doc, anchor) {
+                let card = model::format_card(&topic, &title, &model::keyword_line(&text));
+                doc = phext::insert(doc, anchor, &card);
+            }
             (title, topic)
         };
         let body = model::format_message(&author, post.now, &text);
@@ -300,43 +341,66 @@ pub fn world_from(doc: &str) -> World {
     let mut cards: BTreeMap<String, (String, String, String)> = BTreeMap::new();
     let mut messages: BTreeMap<String, Vec<Message>> = BTreeMap::new();
     let mut anchors: BTreeMap<String, Coordinate> = BTreeMap::new();
+    let mut plain: BTreeMap<String, Vec<Message>> = BTreeMap::new();
+    let mut plain_anchors: BTreeMap<String, Coordinate> = BTreeMap::new();
 
     for coord in coords {
         let raw = &map[&coord];
         if raw.trim().is_empty() {
             continue;
         }
-        let Some(scroll) = model::parse_scroll(raw) else {
-            continue;
-        };
         if is_roster(coord) {
-            if let Scroll::User(user) = scroll {
+            if let Some(Scroll::User(user)) = model::parse_scroll(raw) {
                 users.push(user);
             }
             continue;
         }
-        let key = thread_key(coord);
-        anchors
-            .entry(key.clone())
-            .or_insert_with(|| thread_anchor(coord));
-        match scroll {
-            Scroll::Card {
-                topic,
-                title,
-                keywords,
-            } if is_card_slot(coord) => {
-                cards.insert(key, (topic, title, keywords));
+        if let Some(scroll) = model::parse_scroll(raw) {
+            match scroll {
+                Scroll::Card {
+                    topic,
+                    title,
+                    keywords,
+                } if is_card_slot(coord) => {
+                    let key = thread_key(coord);
+                    anchors
+                        .entry(key.clone())
+                        .or_insert_with(|| thread_anchor(coord));
+                    cards.insert(key, (topic, title, keywords));
+                    continue;
+                }
+                Scroll::Message { author, ts, text } => {
+                    let key = thread_key(coord);
+                    anchors
+                        .entry(key.clone())
+                        .or_insert_with(|| thread_anchor(coord));
+                    messages.entry(key).or_default().push(Message {
+                        coord,
+                        author,
+                        ts,
+                        text,
+                        plain: false,
+                    });
+                    continue;
+                }
+                Scroll::Card { .. } | Scroll::User(_) => {}
             }
-            Scroll::Message { author, ts, text } => {
-                messages.entry(key).or_default().push(Message {
-                    coord,
-                    author,
-                    ts,
-                    text,
-                });
-            }
-            Scroll::Card { .. } | Scroll::User(_) => {}
         }
+        let text = raw.replace("\r\n", "\n").trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let key = section_key(coord);
+        plain_anchors
+            .entry(key.clone())
+            .or_insert_with(|| section_anchor(coord));
+        plain.entry(key).or_default().push(Message {
+            coord,
+            author: model::PLAIN_AUTHOR.into(),
+            ts: DateTime::<Utc>::UNIX_EPOCH,
+            text,
+            plain: true,
+        });
     }
 
     let mut threads = Vec::new();
@@ -352,9 +416,26 @@ pub fn world_from(doc: &str) -> World {
             title,
             keywords,
             messages: msgs,
+            plain: false,
         });
     }
-    threads.sort_by(|a, b| a.coord.cmp(&b.coord));
+    for (key, anchor) in plain_anchors {
+        let mut msgs = plain.remove(&key).unwrap_or_default();
+        msgs.sort_by(|a, b| a.coord.cmp(&b.coord));
+        let title = msgs
+            .first()
+            .map(|message| model::opening_line(&message.text, 80))
+            .unwrap_or_else(|| "Scroll".into());
+        threads.push(Thread {
+            coord: anchor,
+            topic: topic_key(anchor),
+            title,
+            keywords: String::new(),
+            messages: msgs,
+            plain: true,
+        });
+    }
+    threads.sort_by(|a, b| a.coord.cmp(&b.coord).then(a.plain.cmp(&b.plain)));
     World { users, threads }
 }
 
@@ -675,5 +756,84 @@ mod tests {
         );
         assert!(fresh.new_thread);
         assert_eq!(thread_key(fresh.thread), "1.2.1/1.1.2");
+    }
+
+    #[test]
+    fn ordinary_scrolls_become_section_lanes_beside_chat() {
+        let mut doc = String::new();
+        let put = |doc: &mut String, coord: &str, text: &str| {
+            *doc = phext::insert(std::mem::take(doc), parse_coord(coord).unwrap(), text);
+        };
+        put(
+            &mut doc,
+            "1.1.1/1.1.1/1.1.1",
+            "Incipit (It Begins)\nThe opening stays.",
+        );
+        put(
+            &mut doc,
+            "1.1.1/1.1.1/1.1.2",
+            "TTSM\nA second scroll in the same section.",
+        );
+        put(&mut doc, "1.1.1/1.1.1/2.1.1", "TAOP\nAnother chapter.");
+        put(&mut doc, "1.1.1/1.2.1/1.1.1", "MOAT\nAnother book.");
+        put(
+            &mut doc,
+            "1.2.1/1.1.1/1.1.1",
+            &model::format_card("Gardens", "Fern wall", "fern"),
+        );
+        let ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 22, 18, 0, 0).unwrap();
+        put(
+            &mut doc,
+            "1.2.1/1.1.1/1.1.2",
+            &model::format_message("Mira Quill", ts, "The north-wall ferns finally unfurled."),
+        );
+
+        let world = world_from(&doc);
+        let incipit = world
+            .threads
+            .iter()
+            .find(|thread| thread.title == "Incipit (It Begins)")
+            .unwrap();
+        assert!(incipit.plain);
+        assert_eq!(incipit.messages.len(), 2);
+        assert_eq!(incipit.messages[0].author, model::PLAIN_AUTHOR);
+        assert!(incipit.messages[1].text.starts_with("TTSM"));
+        assert_eq!(crate::link::section_lane_id(incipit.coord), "s0");
+        assert_eq!(section_key(incipit.coord), "1.1.1/1.1.1/1.1");
+
+        let chapter = world
+            .threads
+            .iter()
+            .find(|thread| thread.title == "TAOP")
+            .unwrap();
+        assert!(chapter.plain);
+        assert_eq!(chapter.coord.x.chapter, 2);
+        assert_ne!(
+            crate::link::section_lane_id(chapter.coord),
+            crate::link::section_lane_id(incipit.coord)
+        );
+
+        let moat = world
+            .threads
+            .iter()
+            .find(|thread| thread.title == "MOAT")
+            .unwrap();
+        assert_eq!(thread_key(moat.coord), "1.1.1/1.2.1");
+
+        let fern = world
+            .threads
+            .iter()
+            .find(|thread| thread.title == "Fern wall")
+            .unwrap();
+        assert!(!fern.plain);
+        assert_eq!(fern.messages[0].author, "Mira Quill");
+        assert_eq!(crate::link::lane_id(fern.coord), "kcre66i9s");
+        assert_eq!(world.find_lane("kcre66i9s").unwrap().title, "Fern wall");
+        assert_eq!(world.find_lane("s0").unwrap().title, "Incipit (It Begins)");
+        assert!(world.find_post("k1").unwrap().1.text.starts_with("TTSM"));
+        assert_eq!(
+            world.find_post("k5v1j4f4ds79m9t").unwrap().0.title,
+            "Fern wall"
+        );
     }
 }

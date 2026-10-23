@@ -61,6 +61,22 @@ pub fn thread_key(coord: Coordinate) -> String {
     format!("{}/{}", coord.z, coord.y)
 }
 
+/// Chapter and section stay. Scrolls in one section share a lane.
+pub fn section_key(coord: Coordinate) -> String {
+    format!(
+        "{}/{}.{}",
+        thread_key(coord),
+        coord.x.chapter,
+        coord.x.section
+    )
+}
+
+pub fn section_anchor(coord: Coordinate) -> Coordinate {
+    let mut coord = coord;
+    coord.x.scroll = 1;
+    coord
+}
+
 pub fn thread_anchor(coord: Coordinate) -> Coordinate {
     let mut coord = coord;
     coord.x.chapter = 1;
@@ -176,6 +192,9 @@ mod tests {
         assert_eq!(coord.x.scroll, 9);
         assert_eq!(topic_key(coord), "1.2.3");
         assert_eq!(thread_key(coord), "1.2.3/4.5.6");
+        assert_eq!(section_key(coord), "1.2.3/4.5.6/7.8");
+        assert_eq!(section_anchor(coord).x.scroll, 1);
+        assert_eq!(section_anchor(coord).x.chapter, 7);
         assert_eq!(thread_key(thread_anchor(coord)), thread_key(coord));
         assert!(is_card_slot(thread_anchor(coord)));
         assert!(!is_card_slot(coord));

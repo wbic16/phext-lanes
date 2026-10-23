@@ -39,12 +39,17 @@ pub struct User {
     pub interests: Vec<Coordinate>,
 }
 
+/// Author stamped on a scroll that is not a Lanes message.
+pub const PLAIN_AUTHOR: &str = "phext";
+
 #[derive(Debug, Clone)]
 pub struct Message {
     pub coord: Coordinate,
     pub author: String,
     pub ts: DateTime<Utc>,
     pub text: String,
+    /// Ordinary phext text. It is shown, and it is not a chat post.
+    pub plain: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +59,8 @@ pub struct Thread {
     pub title: String,
     pub keywords: String,
     pub messages: Vec<Message>,
+    /// One section of ordinary text, rather than a chat thread.
+    pub plain: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +111,44 @@ pub fn format_message(author: &str, ts: DateTime<Utc>, text: &str) -> String {
         coord::one_line(author),
         coord::sanitize(text).trim_end_matches(['\n', '\r'])
     )
+}
+
+/// First non-empty line, clipped. Empty text becomes "Scroll".
+pub fn opening_line(text: &str, limit: usize) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim();
+    let title: String = line.chars().take(limit).collect();
+    if title.is_empty() {
+        "Scroll".to_string()
+    } else {
+        title
+    }
+}
+
+/// The scroll after its first non-empty line.
+pub fn rest_after_opening(text: &str) -> String {
+    let mut seen = false;
+    let mut lines = Vec::new();
+    for line in text.lines() {
+        if !seen {
+            if line.trim().is_empty() {
+                continue;
+            }
+            seen = true;
+            continue;
+        }
+        lines.push(line);
+    }
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
 }
 
 pub fn title_from_text(text: &str) -> String {

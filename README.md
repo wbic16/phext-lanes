@@ -107,6 +107,8 @@ ts: 2026-10-22T18:00:00Z
 The north-wall ferns finally unfurled.
 ```
 
+A scroll that is not a reader, a thread card, or a message is still shown. Those scrolls are grouped by chapter and section, titled from the first line, and left read-only. A file that mixes both keeps the chat threads as they are. The feed lists section lanes forty at a time, and an open section loads forty scrolls at a time.
+
 Dimension breaks are stripped out of anything a person types, so a message cannot split the file. Newlines stay inside the scroll. Writes call `phext::insert`. A single scroll is read with `phext::fetch`. The contents listing is `phext::textmap`; byte offsets come from `phext::index`.
 
 The delimiters, as libphext defines them:
@@ -115,8 +117,8 @@ The delimiters, as libphext defines them:
 |---|---|---|
 | Line | `0x0A` | Lines inside a scroll |
 | Scroll | `0x17` | Messages in a thread |
-| Section | `0x18` | Sections (unused by this layout) |
-| Chapter | `0x19` | Chapters (unused by this layout) |
+| Section | `0x18` | Sections of ordinary text |
+| Chapter | `0x19` | Chapters of ordinary text |
 | Book | `0x1A` | Books, when a new thread opens on the same volume |
 | Volume | `0x1C` | Fern wall and Seed swap |
 | Collection | `0x1D` | Collections |

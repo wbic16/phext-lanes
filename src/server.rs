@@ -13,16 +13,19 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AdminTokenCheck, PlotHolderCheck};
-use crate::coord::{format_coord, parse_coord, parse_target, thread_key, topic_key, Target};
+use crate::coord::{
+    format_coord, parse_coord, parse_target, section_key, thread_key, topic_key, Target,
+};
 use crate::error::Error;
 use crate::fabric::{self, day_stamp, download_filename, FabricError, ParsedRoute, Route};
-use crate::link::{lane_id, post_id};
-use crate::model::{preview, Message};
+use crate::link::{lane_id, post_id, section_lane_id};
+use crate::model::{self, preview, Message};
 use crate::rank::{self, Feed, MapEntry};
 use crate::store::{Post, Store};
 
 const INDEX: &str = include_str!("../static/index.html");
 const BODY_LIMIT: usize = fabric::MAX_FABRIC_BYTES;
+const PAGE: usize = 40;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -146,7 +149,13 @@ fn handle(
             let user = query.get("user").map(String::as_str);
             Ok(Json(state_of(app, fabric, user)?).into_response())
         }
-        Route::ApiLane(id) => Ok(Json(open_lane(app, fabric, id)?).into_response()),
+        Route::ApiLane(id) => {
+            let offset = query
+                .get("offset")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            Ok(Json(open_lane(app, fabric, id, offset)?).into_response())
+        }
         Route::ApiPost(id) => Ok(Json(open_post(app, fabric, id)?).into_response()),
         Route::Room => {
             let thread = query
@@ -281,13 +290,18 @@ fn state_of(
         .with_store(fabric, |store| snapshot(store, user, &meta))?
 }
 
-fn open_lane(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, AppError> {
+fn open_lane(
+    app: &AppState,
+    fabric: Option<&str>,
+    id: &str,
+    offset: usize,
+) -> Result<OpenDto, AppError> {
     app.hub.with_store(fabric, |store| {
         let world = store.world();
         let thread = world.find_lane(id).ok_or_else(AppError::missing)?;
         Ok(OpenDto {
             highlight: None,
-            room: room_dto(thread),
+            room: room_dto(thread, offset),
         })
     })?
 }
@@ -296,9 +310,14 @@ fn open_post(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, 
     app.hub.with_store(fabric, |store| {
         let world = store.world();
         let (thread, message) = world.find_post(id).ok_or_else(AppError::missing)?;
+        let index = thread
+            .messages
+            .iter()
+            .position(|item| item.coord == message.coord)
+            .unwrap_or(0);
         Ok(OpenDto {
             highlight: Some(post_id(message.coord)),
-            room: room_dto(thread),
+            room: room_dto(thread, (index / PAGE) * PAGE),
         })
     })?
 }
@@ -310,7 +329,7 @@ fn room(app: &AppState, fabric: Option<&str>, thread: &str) -> Result<RoomDto, A
         let thread = world
             .thread(&key)
             .ok_or_else(|| AppError::bad(format!("no thread at {key}")))?;
-        Ok(room_dto(thread))
+        Ok(room_dto(thread, 0))
     })?
 }
 
@@ -347,7 +366,11 @@ fn toc(app: &AppState, fabric: Option<&str>) -> Result<TocDto, AppError> {
             .threads
             .iter()
             .map(|thread| TocThread {
-                thread: thread_key(thread.coord),
+                thread: if thread.plain {
+                    section_key(thread.coord)
+                } else {
+                    thread_key(thread.coord)
+                },
                 topic: thread.topic.clone(),
                 title: thread.title.clone(),
                 messages: thread.messages.len(),
@@ -639,14 +662,18 @@ fn snapshot(
         (viewer_dto(&world, user), interests)
     };
     let now = Utc::now();
-    let feed = rank::build_feed(
-        &world.threads,
-        &interests,
-        now,
-        rank::AUTHOR_CAP,
-        rank::MAX_THREADS,
-    );
-    let map = rank::map_of(&world.threads, &interests);
+    let chat: Vec<crate::model::Thread> = world
+        .threads
+        .iter()
+        .filter(|thread| !thread.plain)
+        .cloned()
+        .collect();
+    let feed = rank::build_feed(&chat, &interests, now, rank::AUTHOR_CAP, rank::MAX_THREADS);
+    let map = rank::map_of(&chat, &interests);
+    let mut feed_rows = feed_dto(&feed);
+    for thread in world.threads.iter().filter(|thread| thread.plain) {
+        feed_rows.push(plain_row(thread));
+    }
     Ok(StateDto {
         file: store.path().display().to_string(),
         fabric: meta.fabric.clone(),
@@ -665,7 +692,7 @@ fn snapshot(
                 blurb: user.blurb.clone(),
             })
             .collect(),
-        feed: feed_dto(&feed),
+        feed: feed_rows,
         lanes: feed
             .lanes
             .iter()
@@ -717,8 +744,41 @@ fn feed_dto(feed: &Feed) -> Vec<FeedThreadDto> {
             nearness: thread.nearness.to_string(),
             messages: thread.admitted.iter().map(msg_dto).collect(),
             held: thread.held.iter().map(msg_dto).collect(),
+            plain: false,
         })
         .collect()
+}
+
+/// One line of a section. Later scrolls stay out of the feed payload.
+fn plain_row(thread: &crate::model::Thread) -> FeedThreadDto {
+    let preview_message = thread.messages.first().and_then(|message| {
+        let rest = model::rest_after_opening(&message.text);
+        let shown = preview(&rest, 160);
+        if shown.is_empty() {
+            return None;
+        }
+        Some(MsgDto {
+            id: post_id(message.coord),
+            coord: format_coord(message.coord),
+            author: message.author.clone(),
+            ts: stamp(message.ts),
+            text: shown.clone(),
+            preview: shown,
+        })
+    });
+    FeedThreadDto {
+        id: section_lane_id(thread.coord),
+        thread: section_key(thread.coord),
+        topic: thread.topic.clone(),
+        topic_coord: topic_key(thread.coord),
+        title: thread.title.clone(),
+        distance: 0,
+        score: 0.0,
+        nearness: String::new(),
+        messages: preview_message.into_iter().collect(),
+        held: Vec::new(),
+        plain: true,
+    }
 }
 
 fn map_dto(entry: MapEntry) -> MapDto {
@@ -740,16 +800,34 @@ fn map_dto(entry: MapEntry) -> MapDto {
     }
 }
 
-fn room_dto(thread: &crate::model::Thread) -> RoomDto {
+fn room_dto(thread: &crate::model::Thread, offset: usize) -> RoomDto {
+    let total = thread.messages.len();
+    let (start, end) = if offset >= total {
+        (total, total)
+    } else {
+        (offset, (offset + PAGE).min(total))
+    };
+    let page = &thread.messages[start..end];
     let (majority_author, majority_count, majority_share) = rank::majority(&thread.messages);
     RoomDto {
-        id: lane_id(thread.coord),
-        thread: thread_key(thread.coord),
+        id: if thread.plain {
+            section_lane_id(thread.coord)
+        } else {
+            lane_id(thread.coord)
+        },
+        thread: if thread.plain {
+            section_key(thread.coord)
+        } else {
+            thread_key(thread.coord)
+        },
         topic: thread.topic.clone(),
         topic_coord: topic_key(thread.coord),
         title: thread.title.clone(),
-        messages: thread.messages.iter().map(msg_dto).collect(),
-        message_count: thread.messages.len(),
+        messages: page.iter().map(msg_dto).collect(),
+        message_count: total,
+        offset: start,
+        more: end < total,
+        plain: thread.plain,
         majority_author,
         majority_count,
         majority_share,
@@ -896,6 +974,7 @@ struct FeedThreadDto {
     nearness: String,
     messages: Vec<MsgDto>,
     held: Vec<MsgDto>,
+    plain: bool,
 }
 
 #[derive(Serialize)]
@@ -943,6 +1022,9 @@ struct RoomDto {
     title: String,
     messages: Vec<MsgDto>,
     message_count: usize,
+    offset: usize,
+    more: bool,
+    plain: bool,
     majority_author: Option<String>,
     majority_count: usize,
     majority_share: f64,
@@ -1027,6 +1109,31 @@ fn lane_share(thread: &crate::model::Thread) -> Share {
 }
 
 fn post_share(thread: &crate::model::Thread, message: &Message) -> Share {
+    if thread.plain || message.plain {
+        let title = model::opening_line(&message.text, 80);
+        let rest = model::rest_after_opening(&message.text);
+        let description = {
+            let text = preview(
+                if rest.is_empty() {
+                    &message.text
+                } else {
+                    &rest
+                },
+                180,
+            );
+            if text.is_empty() {
+                "A scroll.".to_string()
+            } else {
+                text
+            }
+        };
+        return Share {
+            title: format!("{title} · Lanes"),
+            og_title: title,
+            description,
+            og_type: "article",
+        };
+    }
     let og_title = format!("{} — {}", thread.title, message.author);
     let description = {
         let text = preview(&message.text, 180);
@@ -1171,6 +1278,7 @@ mod tests {
         assert!(!page.contains("lane-banner"));
         assert!(!page.contains("class=\"spine\""));
         assert!(!page.contains("class=\"pages\""));
+        assert!(page.contains("Nothing in this phext yet."));
     }
 }
 
@@ -1477,6 +1585,224 @@ mod http_tests {
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
         assert!(!file.dir.join("x.phext").exists());
+    }
+
+    fn put_scroll(doc: &mut String, coord: &str, text: &str) {
+        *doc = libphext::phext::insert(std::mem::take(doc), parse_coord(coord).unwrap(), text);
+    }
+
+    async fn upload(app: &Router, name: &str, doc: &str) {
+        let (status, body) = send(
+            app,
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/fabrics/upload?name={name}"))
+                .header("authorization", "Bearer plot-secret")
+                .header("content-type", "application/octet-stream")
+                .body(Body::from(doc.to_string()))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test]
+    async fn ordinary_phext_is_readable_and_chat_stays_chat() {
+        let (app, _file) = app();
+        let mut doc = String::new();
+        put_scroll(
+            &mut doc,
+            "1.1.1/1.1.1/1.1.1",
+            "Incipit (It Begins)\nThe opening stays.",
+        );
+        put_scroll(
+            &mut doc,
+            "1.1.1/1.1.1/1.1.2",
+            "TTSM\nA second scroll in the same section.",
+        );
+        put_scroll(&mut doc, "1.1.1/1.1.1/2.1.1", "TAOP\nAnother chapter.");
+        put_scroll(&mut doc, "1.1.1/1.2.1/1.1.1", "MOAT\nAnother book.");
+        put_scroll(
+            &mut doc,
+            "1.2.1/1.1.1/1.1.1",
+            &crate::model::format_card("Gardens", "Fern wall", "fern"),
+        );
+        let ts = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 10, 22, 18, 0, 0).unwrap();
+        put_scroll(
+            &mut doc,
+            "1.2.1/1.1.1/1.1.2",
+            &crate::model::format_message(
+                "Mira Quill",
+                ts,
+                "The north-wall ferns finally unfurled.",
+            ),
+        );
+        upload(&app, "incipit", &doc).await;
+
+        let (status, body) = send(&app, get("/f/incipit/api/state?user=x")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let titles: Vec<&str> = json["feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|thread| thread["title"].as_str().unwrap())
+            .collect();
+        assert!(titles.contains(&"Incipit (It Begins)"), "{titles:?}");
+        assert!(titles.contains(&"TAOP"), "{titles:?}");
+        assert!(titles.contains(&"MOAT"), "{titles:?}");
+        assert!(titles.contains(&"Fern wall"), "{titles:?}");
+        assert!(!titles.contains(&"TTSM"), "{titles:?}");
+        assert!(!body.contains("A second scroll"));
+        let fern = json["feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|thread| thread["title"] == "Fern wall")
+            .unwrap();
+        assert_eq!(fern["plain"], false);
+        assert_eq!(fern["id"], "kcre66i9s");
+        assert_eq!(fern["messages"][0]["author"], "Mira Quill");
+        let incipit = json["feed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|thread| thread["title"] == "Incipit (It Begins)")
+            .unwrap();
+        assert_eq!(incipit["plain"], true);
+        assert_eq!(incipit["id"], "s0");
+        assert_eq!(incipit["thread"], "1.1.1/1.1.1/1.1");
+
+        let (status, body) = send(&app, get("/f/incipit/api/l/s0")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let room: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(room["messages"].as_array().unwrap().len(), 2);
+        assert!(room["messages"][1]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("TTSM"));
+        assert_eq!(room["more"], false);
+
+        let (status, body) = send(&app, get("/f/incipit/api/p/k1")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let post: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(post["highlight"], "k1");
+        assert_eq!(post["id"], "s0");
+        assert_eq!(post["plain"], true);
+
+        let (status, page) = send(&app, get("/f/incipit/p/k1")).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.contains("TTSM"));
+        assert!(!page.contains("phext —"));
+
+        let (status, _headers, fork) = send_parts(&app, get("/f/incipit/l/s0/chat.phext")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(fork.contains("The opening stays."));
+        assert!(fork.contains("TTSM"));
+        assert!(!fork.contains("Another chapter."));
+
+        let (status, body) = send(&app, get("/f/incipit/api/l/kcre66i9s")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let fern_room: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(fern_room["plain"], false);
+        assert_eq!(fern_room["id"], "kcre66i9s");
+        assert_eq!(fern_room["messages"][0]["author"], "Mira Quill");
+    }
+
+    #[tokio::test]
+    async fn a_long_section_is_paged_and_absent_from_the_feed() {
+        let (app, _file) = app();
+        let mut doc = String::new();
+        for scroll in 1..=45 {
+            let text = if scroll == 45 {
+                "Scroll 45\nsecret-body-45".to_string()
+            } else if scroll == 1 {
+                "Scroll 1\nkept in the summary".to_string()
+            } else {
+                format!("Scroll {scroll}\nbody {scroll}")
+            };
+            put_scroll(&mut doc, &format!("1.1.1/1.1.1/1.1.{scroll}"), &text);
+        }
+        upload(&app, "long", &doc).await;
+
+        let (status, body) = send(&app, get("/f/long/api/state?user=x")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(!body.contains("secret-body-45"), "{body}");
+        assert!(body.contains("kept in the summary"));
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["feed"].as_array().unwrap().len(), 1);
+        assert_eq!(json["feed"][0]["title"], "Scroll 1");
+        assert_eq!(json["feed"][0]["id"], "s0");
+        assert_eq!(json["users"].as_array().unwrap().len(), 0);
+
+        let (status, body) = send(&app, get("/f/long/api/l/s0")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let first: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(first["messages"].as_array().unwrap().len(), 40);
+        assert_eq!(first["offset"], 0);
+        assert_eq!(first["more"], true);
+        assert_eq!(first["message_count"], 45);
+        assert!(!body.contains("secret-body-45"));
+
+        let (status, body) = send(&app, get("/f/long/api/l/s0?offset=40")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(second["messages"].as_array().unwrap().len(), 5);
+        assert_eq!(second["offset"], 40);
+        assert_eq!(second["more"], false);
+        assert!(body.contains("secret-body-45"));
+        let last = second["messages"].as_array().unwrap().last().unwrap();
+        let id = last["id"].as_str().unwrap();
+
+        let (status, body) = send(&app, get(&format!("/f/long/api/p/{id}"))).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let opened: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(opened["highlight"], id);
+        assert_eq!(opened["offset"], 40);
+        assert!(opened["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|message| message["text"].as_str().unwrap().contains("secret-body-45")));
+    }
+
+    #[tokio::test]
+    async fn many_sections_stay_listed_without_the_thread_cap() {
+        let (app, _file) = app();
+        let mut doc = String::new();
+        for section in 1..=41 {
+            put_scroll(
+                &mut doc,
+                &format!("1.1.1/1.1.1/1.{section}.1"),
+                &format!("Section {section}"),
+            );
+        }
+        upload(&app, "wide", &doc).await;
+        let (status, body) = send(&app, get("/f/wide/api/state?user=x")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let feed = json["feed"].as_array().unwrap();
+        assert_eq!(feed.len(), 41);
+        assert!(feed.iter().all(|thread| thread["plain"] == true));
+        assert_eq!(feed[0]["title"], "Section 1");
+        assert_eq!(feed[40]["title"], "Section 41");
+        assert!(feed
+            .iter()
+            .all(|thread| thread["messages"].as_array().unwrap().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn an_empty_fabric_has_an_empty_feed() {
+        let (app, _file) = app();
+        let (status, body) = send(&app, bearer("plot-secret")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = send(&app, get("/f/notes/api/state?user=mira")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["feed"].as_array().unwrap().len(), 0);
+        let (status, page) = send(&app, get("/f/notes/")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("Nothing in this phext yet."));
     }
 
     async fn send_parts(

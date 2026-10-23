@@ -137,6 +137,26 @@ impl Store {
         &self.doc
     }
 
+    /// Load a fabric that already exists. Do not seed over it.
+    pub fn load_doc(path: impl Into<PathBuf>) -> Result<Self, Error> {
+        let path = path.into();
+        let bytes = fs::read(&path)?;
+        let doc = String::from_utf8(bytes).map_err(|_| Error::Bad("fabric is not utf-8".into()))?;
+        if doc.trim().is_empty() {
+            return Err(Error::Bad("fabric is empty".into()));
+        }
+        let _ = phext::explode(&doc);
+        let _ = world_from(&doc);
+        Ok(Store { path, doc })
+    }
+
+    pub fn from_doc(path: impl Into<PathBuf>, doc: String) -> Self {
+        Store {
+            path: path.into(),
+            doc,
+        }
+    }
+
     pub fn world(&self) -> World {
         world_from(&self.doc)
     }

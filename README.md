@@ -8,7 +8,7 @@ Open http://127.0.0.1:7841. You are Mira. Type a message and press Enter. The fi
 
 ---
 
-Predictive multi-chat, stored as one [phext](https://phext.io) file. The page is one feed: a line for each relevant thread, then a compose box. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
+Predictive multi-chat, stored as one [phext](https://mirrorborn.us) file. The page is one feed: a line for each relevant thread, then a compose box. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
 
 The cast is fictional: Mira Quill, Jules Fen, Ada North, Ren Sato, and Casey Horn. Casey is the hyper-poster.
 
@@ -19,6 +19,8 @@ You land on Mira's feed. Fern wall and Seed swap lead, because those are her int
 Each thread, and each message inside it, has a quiet **link**. `/l/…` opens that thread. `/p/…` opens the thread with that message marked. The address comes from the phext coordinate, so it still works after a restart or a redeploy. An unknown address says it doesn't go anywhere.
 
 The name at the top switches reader. Casey's feed opens on General, and he still only gets two lines, so the quieter voices stay visible. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
+
+**fork** downloads this phext. An open thread also has a fork of just that thread. The menu switches fabric. The default fabric keeps `/l/…` and `/p/…`. Another fabric lives at `/f/<name>/…`, in `data/fabrics/<name>.phext` locally and `/var/lib/phext-lanes/fabrics/<name>.phext` on the server. **create fabric** is for [founding plot holders in Tessera](https://mirrorborn.us). Until that check is connected, the server allows it only with the admin token in `/etc/phext-lanes/admin.env`, which `deploy.sh` creates on the server and does not print. Browsing and fork stay open.
 
 ## CLI
 
@@ -174,7 +176,7 @@ cd phext-lanes
 bash deploy.sh
 ```
 
-That builds this branch with `/snap/bin` and `~/.cargo/bin` on `PATH`, listens on `127.0.0.1:7841`, and keeps the phext in `/var/lib/phext-lanes` across redeploys. It writes only `/etc/nginx/sites-available/mc.phext.io`, links that file from `sites-enabled`, runs `nginx -t`, and reloads nginx. Other site files are left alone. If nginx is already failing `nginx -t`, the script stops and changes nothing. Point `mc.phext.io` at `44.248.235.76`. Certbot runs `certbot --nginx -d mc.phext.io` only when that name resolves to this machine and certbot is installed; otherwise the script prints the command. The demo cast is written only when the data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. `--user` selects the systemd account (the default is whoever runs the script). Run `bash deploy.sh` again to redeploy.
+That builds this branch with `/snap/bin` and `~/.cargo/bin` on `PATH`, listens on `127.0.0.1:7841`, and keeps the phext in `/var/lib/phext-lanes` across redeploys. Named fabrics go in `/var/lib/phext-lanes/fabrics`. The nginx site allows uploads up to 6 MB. `LANES_ADMIN_TOKEN` is written to `/etc/phext-lanes/admin.env` (mode 0600) only when that file is missing, and the value is not printed. It writes only `/etc/nginx/sites-available/mc.phext.io`, links that file from `sites-enabled`, runs `nginx -t`, and reloads nginx. Other site files are left alone. If nginx is already failing `nginx -t`, the script stops and changes nothing. Point `mc.phext.io` at `44.248.235.76`. Certbot runs `certbot --nginx -d mc.phext.io` only when that name resolves to this machine and certbot is installed; otherwise the script prints the command. The demo cast is written only when the data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. `--user` selects the systemd account (the default is whoever runs the script). Run `bash deploy.sh` again to redeploy.
 
 ## License
 

@@ -1,27 +1,52 @@
 //! Small axum reading room. One HTML page, JSON for the feed.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, State};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::any;
 use axum::{Json, Router};
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::{AdminTokenCheck, PlotHolderCheck};
 use crate::coord::{format_coord, parse_coord, parse_target, thread_key, topic_key, Target};
 use crate::error::Error;
+use crate::fabric::{self, day_stamp, download_filename, FabricError, ParsedRoute, Route};
 use crate::link::{lane_id, post_id};
 use crate::model::{preview, Message};
 use crate::rank::{self, Feed, MapEntry};
 use crate::store::{Post, Store};
 
 const INDEX: &str = include_str!("../static/index.html");
+const BODY_LIMIT: usize = fabric::MAX_FABRIC_BYTES;
 
 #[derive(Clone)]
 pub struct AppState {
-    store: Arc<Mutex<Store>>,
+    hub: Arc<fabric::Hub>,
+    auth: Arc<dyn PlotHolderCheck>,
+}
+
+impl AppState {
+    pub fn open(path: std::path::PathBuf) -> Result<Self, Error> {
+        Ok(Self {
+            hub: Arc::new(fabric::Hub::open(path)?),
+            auth: Arc::new(AdminTokenCheck::from_env()),
+        })
+    }
+
+    pub fn with_auth(
+        path: std::path::PathBuf,
+        auth: Arc<dyn PlotHolderCheck>,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            hub: Arc::new(fabric::Hub::open(path)?),
+            auth,
+        })
+    }
 }
 
 /// `host:port`, with brackets when `host` is an IPv6 address.
@@ -38,11 +63,11 @@ pub async fn serve(path: std::path::PathBuf, host: &str, port: u16) -> Result<()
     if host.is_empty() {
         return Err(Error::Bad("listen host is empty".into()));
     }
-    let store = Store::open(path)?;
-    let label = store.path().display().to_string();
-    let state = AppState {
-        store: Arc::new(Mutex::new(store)),
-    };
+    let state = AppState::open(path)?;
+    let label = state
+        .hub
+        .with_store(None, |store| store.path().display().to_string())
+        .unwrap_or_else(|_| "chat.phext".into());
     let app = router(state);
     let addr = listen_addr(host, port);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -64,202 +89,288 @@ pub async fn serve(path: std::path::PathBuf, host: &str, port: u16) -> Result<()
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(page_home))
-        .route("/l/:id", get(page_lane))
-        .route("/p/:id", get(page_post))
-        .route("/api/health", get(health))
-        .route("/api/state", get(state_view))
-        .route("/api/l/:id", get(api_lane))
-        .route("/api/p/:id", get(api_post))
-        .route("/api/room", get(room))
-        .route("/api/suggest", get(suggest))
-        .route("/api/toc", get(toc))
-        .route("/api/scroll", get(scroll))
-        .route("/api/post", post(post_message))
-        .route("/api/reset", post(reset))
+        .route("/", any(dispatch))
+        .route("/*path", any(dispatch))
+        .layer(DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
 }
 
-async fn page_home(headers: HeaderMap) -> Response {
-    render_page(&home_share(), &public_url(&headers, "/")).into_response()
-}
-
-async fn page_lane(
+async fn dispatch(
     State(app): State<AppState>,
-    Path(id): Path<String>,
+    uri: Uri,
     headers: HeaderMap,
+    method: axum::http::Method,
+    body: Bytes,
 ) -> Response {
-    let found = {
-        let store = match lock(&app) {
-            Ok(store) => store,
-            Err(err) => return err.into_response(),
-        };
-        let world = store.world();
-        match world.find_lane(&id) {
-            Some(thread) => Some((lane_share(thread), format!("/l/{}", lane_id(thread.coord)))),
-            None => None,
-        }
+    let parsed = match fabric::parse_route(uri.path()) {
+        Ok(parsed) => parsed,
+        Err(_) => return not_found_page(),
     };
-    match found {
-        Some((share, path)) => render_page(&share, &public_url(&headers, &path)).into_response(),
-        None => not_found_page(),
+    let get = method == axum::http::Method::GET || method == axum::http::Method::HEAD;
+    let post = method == axum::http::Method::POST;
+    if parsed.route.is_post() {
+        if !post {
+            return method_not_allowed();
+        }
+    } else if !get {
+        return method_not_allowed();
+    }
+    match handle(&app, &parsed, &uri, &headers, &body) {
+        Ok(response) => response,
+        Err(err) => {
+            if matches!(err.status, StatusCode::NOT_FOUND) && parsed.route.is_page() {
+                not_found_page()
+            } else {
+                err.into_response()
+            }
+        }
     }
 }
 
-async fn page_post(
-    State(app): State<AppState>,
-    Path(id): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let found = {
-        let store = match lock(&app) {
-            Ok(store) => store,
-            Err(err) => return err.into_response(),
-        };
-        let world = store.world();
-        match world.find_post(&id) {
-            Some((thread, message)) => Some((
-                post_share(thread, message),
-                format!("/p/{}", post_id(message.coord)),
-            )),
-            None => None,
-        }
-    };
-    match found {
-        Some((share, path)) => render_page(&share, &public_url(&headers, &path)).into_response(),
-        None => not_found_page(),
-    }
-}
-
-async fn api_lane(
-    State(app): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<OpenDto>, AppError> {
-    let store = lock(&app)?;
-    let world = store.world();
-    let thread = world.find_lane(&id).ok_or_else(AppError::missing)?;
-    Ok(Json(OpenDto {
-        highlight: None,
-        room: room_dto(thread),
-    }))
-}
-
-async fn api_post(
-    State(app): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<OpenDto>, AppError> {
-    let store = lock(&app)?;
-    let world = store.world();
-    let (thread, message) = world.find_post(&id).ok_or_else(AppError::missing)?;
-    Ok(Json(OpenDto {
-        highlight: Some(post_id(message.coord)),
-        room: room_dto(thread),
-    }))
-}
-
-async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({"ok": true}))
-}
-
-#[derive(Deserialize)]
-struct UserQuery {
-    user: Option<String>,
-}
-
-async fn state_view(
-    State(app): State<AppState>,
-    Query(query): Query<UserQuery>,
-) -> Result<Json<StateDto>, AppError> {
-    let store = lock(&app)?;
-    let dto = snapshot(&store, query.user.as_deref())?;
-    Ok(Json(dto))
-}
-
-#[derive(Deserialize)]
-struct RoomQuery {
-    thread: String,
-}
-
-async fn room(
-    State(app): State<AppState>,
-    Query(query): Query<RoomQuery>,
-) -> Result<Json<RoomDto>, AppError> {
-    let store = lock(&app)?;
-    let key = thread_key_from(&query.thread)?;
-    let world = store.world();
-    let thread = world
-        .thread(&key)
-        .ok_or_else(|| AppError::bad(format!("no thread at {key}")))?;
-    Ok(Json(room_dto(thread)))
-}
-
-#[derive(Deserialize)]
-struct SuggestQuery {
-    user: Option<String>,
-    text: Option<String>,
-}
-
-async fn suggest(
-    State(app): State<AppState>,
-    Query(query): Query<SuggestQuery>,
-) -> Result<Json<SuggestDto>, AppError> {
-    let store = lock(&app)?;
-    let world = store.world();
-    let user = resolve_user(&world, query.user.as_deref())?;
-    let suggestion = rank::suggest(
-        &world.threads,
-        &user.interests,
-        query.text.as_deref().unwrap_or(""),
-        Utc::now(),
-    );
-    Ok(Json(SuggestDto {
-        coord: format_coord(suggestion.coord),
-        thread: thread_key(suggestion.thread),
-        title: suggestion.title,
-        topic: suggestion.topic,
-        new_thread: suggestion.new_thread,
-        overlap: suggestion.overlap,
-        reason: suggestion.reason,
-    }))
-}
-
-async fn toc(State(app): State<AppState>) -> Result<Json<TocDto>, AppError> {
-    let store = lock(&app)?;
-    let world = store.world();
-    let threads = world
-        .threads
-        .iter()
-        .map(|thread| TocThread {
-            thread: thread_key(thread.coord),
-            topic: thread.topic.clone(),
-            title: thread.title.clone(),
-            messages: thread.messages.len(),
-        })
-        .collect();
-    Ok(Json(TocDto {
-        textmap: store.toc(),
-        index: store.byte_index(),
-        threads,
-    }))
-}
-
-#[derive(Deserialize)]
-struct ScrollQuery {
-    coord: String,
-}
-
-async fn scroll(
-    State(app): State<AppState>,
-    Query(query): Query<ScrollQuery>,
+fn handle(
+    app: &AppState,
+    parsed: &ParsedRoute,
+    uri: &Uri,
+    headers: &HeaderMap,
+    body: &[u8],
 ) -> Result<Response, AppError> {
-    let coord = parse_coord(&query.coord).map_err(AppError::bad)?;
-    let store = lock(&app)?;
-    let raw = store.select(coord);
-    let body = if raw.is_empty() {
-        "(empty scroll)\n".to_string()
-    } else {
-        raw
+    let fabric = parsed.fabric.as_deref();
+    let query = query_map(uri);
+    match &parsed.route {
+        Route::Home => Ok(page(app, fabric, headers, PageView::Home)?),
+        Route::Lane(id) => Ok(page(app, fabric, headers, PageView::Lane(id))?),
+        Route::Post(id) => Ok(page(app, fabric, headers, PageView::Post(id))?),
+        Route::Download { lane } => Ok(download(app, fabric, lane.as_deref())?),
+        Route::Health => Ok(Json(serde_json::json!({"ok": true})).into_response()),
+        Route::State => {
+            let user = query.get("user").map(String::as_str);
+            Ok(Json(state_of(app, fabric, user)?).into_response())
+        }
+        Route::ApiLane(id) => Ok(Json(open_lane(app, fabric, id)?).into_response()),
+        Route::ApiPost(id) => Ok(Json(open_post(app, fabric, id)?).into_response()),
+        Route::Room => {
+            let thread = query
+                .get("thread")
+                .map(String::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok(Json(room(app, fabric, &thread)?).into_response())
+        }
+        Route::Suggest => Ok(Json(suggest(
+            app,
+            fabric,
+            query.get("user").map(String::as_str),
+            query.get("text").map(String::as_str).unwrap_or(""),
+        )?)
+        .into_response()),
+        Route::Toc => Ok(Json(toc(app, fabric)?).into_response()),
+        Route::Scroll => {
+            let coord = query.get("coord").map(String::as_str).unwrap_or("");
+            Ok(scroll(app, fabric, coord)?)
+        }
+        Route::PostMessage => Ok(Json(post_message(app, fabric, body)?).into_response()),
+        Route::Reset => Ok(Json(reset(app, fabric)?).into_response()),
+        Route::Access => Ok(Json(serde_json::json!({
+            "create": app.auth.plot_holder_check(&bearer(headers)),
+        }))
+        .into_response()),
+        Route::Create => Ok(Json(create_empty(app, fabric, headers, body)?).into_response()),
+        Route::Upload => Ok(Json(upload_fabric(
+            app,
+            fabric,
+            headers,
+            body,
+            query.get("name").map(String::as_str),
+        )?)
+        .into_response()),
+    }
+}
+
+enum PageView<'a> {
+    Home,
+    Lane(&'a str),
+    Post(&'a str),
+}
+
+fn page(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    view: PageView<'_>,
+) -> Result<Response, AppError> {
+    let found = app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        match view {
+            PageView::Home => Ok(home_share()),
+            PageView::Lane(id) => world
+                .find_lane(id)
+                .map(lane_share)
+                .ok_or_else(AppError::missing),
+            PageView::Post(id) => world
+                .find_post(id)
+                .map(|(thread, message)| post_share(thread, message))
+                .ok_or_else(AppError::missing),
+        }
+    })??;
+    let path = match view {
+        PageView::Home => fabric_home(fabric),
+        PageView::Lane(id) => format!("{}/l/{id}", public_prefix(fabric)),
+        PageView::Post(id) => format!("{}/p/{id}", public_prefix(fabric)),
     };
+    Ok(render_page(&found, &public_url(headers, &path), fabric).into_response())
+}
+
+fn download(
+    app: &AppState,
+    fabric: Option<&str>,
+    lane: Option<&str>,
+) -> Result<Response, AppError> {
+    let day = day_stamp(Utc::now());
+    let packed = app
+        .hub
+        .with_store(fabric, |store| -> Result<(String, String), AppError> {
+            let doc = store.doc().to_string();
+            let world = store.world();
+            match lane {
+                None => Ok((download_filename(fabric, None, &day), doc)),
+                Some(id) => {
+                    let thread = world.find_lane(id).ok_or_else(AppError::missing)?;
+                    let body = fabric::lane_document(&doc, thread);
+                    let name = download_filename(fabric, Some(&thread.title), &day);
+                    Ok((name, body))
+                }
+            }
+        })??;
+    let (filename, body) = packed;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    let disposition = format!("attachment; filename=\"{filename}\"");
+    headers.insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&disposition).map_err(|_| AppError::server("bad filename"))?,
+    );
+    Ok((headers, body).into_response())
+}
+
+fn state_of(
+    app: &AppState,
+    fabric: Option<&str>,
+    user: Option<&str>,
+) -> Result<StateDto, AppError> {
+    let names = app.hub.list()?;
+    let meta = FabricView {
+        fabric: fabric.unwrap_or("").to_string(),
+        fabrics: names
+            .into_iter()
+            .map(|name| FabricDto {
+                label: if name.is_empty() {
+                    "Lanes".into()
+                } else {
+                    name.clone()
+                },
+                name,
+            })
+            .collect(),
+        fork: format!("{}/chat.phext", public_prefix(fabric)),
+        demo: fabric.is_none(),
+    };
+    app.hub
+        .with_store(fabric, |store| snapshot(store, user, &meta))?
+}
+
+fn open_lane(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, AppError> {
+    app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        let thread = world.find_lane(id).ok_or_else(AppError::missing)?;
+        Ok(OpenDto {
+            highlight: None,
+            room: room_dto(thread),
+        })
+    })?
+}
+
+fn open_post(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, AppError> {
+    app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        let (thread, message) = world.find_post(id).ok_or_else(AppError::missing)?;
+        Ok(OpenDto {
+            highlight: Some(post_id(message.coord)),
+            room: room_dto(thread),
+        })
+    })?
+}
+
+fn room(app: &AppState, fabric: Option<&str>, thread: &str) -> Result<RoomDto, AppError> {
+    let key = thread_key_from(thread)?;
+    app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        let thread = world
+            .thread(&key)
+            .ok_or_else(|| AppError::bad(format!("no thread at {key}")))?;
+        Ok(room_dto(thread))
+    })?
+}
+
+fn suggest(
+    app: &AppState,
+    fabric: Option<&str>,
+    user: Option<&str>,
+    text: &str,
+) -> Result<SuggestDto, AppError> {
+    app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        let interests = if world.users.is_empty() {
+            Vec::new()
+        } else {
+            resolve_user(&world, user)?.interests.clone()
+        };
+        let suggestion = rank::suggest(&world.threads, &interests, text, Utc::now());
+        Ok(SuggestDto {
+            coord: format_coord(suggestion.coord),
+            thread: thread_key(suggestion.thread),
+            title: suggestion.title,
+            topic: suggestion.topic,
+            new_thread: suggestion.new_thread,
+            overlap: suggestion.overlap,
+            reason: suggestion.reason,
+        })
+    })?
+}
+
+fn toc(app: &AppState, fabric: Option<&str>) -> Result<TocDto, AppError> {
+    app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        let threads = world
+            .threads
+            .iter()
+            .map(|thread| TocThread {
+                thread: thread_key(thread.coord),
+                topic: thread.topic.clone(),
+                title: thread.title.clone(),
+                messages: thread.messages.len(),
+            })
+            .collect();
+        Ok(TocDto {
+            textmap: store.toc(),
+            index: store.byte_index(),
+            threads,
+        })
+    })?
+}
+
+fn scroll(app: &AppState, fabric: Option<&str>, coord: &str) -> Result<Response, AppError> {
+    let coord = parse_coord(coord).map_err(AppError::bad)?;
+    let body = app.hub.with_store(fabric, |store| {
+        let raw = store.select(coord);
+        if raw.is_empty() {
+            "(empty scroll)\n".to_string()
+        } else {
+            raw
+        }
+    })?;
     Ok(([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], body).into_response())
 }
 
@@ -270,53 +381,206 @@ struct PostBody {
     coord: Option<String>,
 }
 
-async fn post_message(
-    State(app): State<AppState>,
-    Json(body): Json<PostBody>,
-) -> Result<Json<PostOut>, AppError> {
-    let mut store = lock(&app)?;
-    let world = store.world();
-    let user = resolve_user(&world, Some(&body.user))?.clone();
-    let target = if let Some(coord) = body
-        .coord
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        parse_target(coord).map_err(AppError::bad)?
-    } else {
-        let suggestion = rank::suggest(&world.threads, &user.interests, &body.text, Utc::now());
-        Target::Scroll(suggestion.coord)
-    };
-    let placed = store
-        .place(Post {
+fn post_message(app: &AppState, fabric: Option<&str>, body: &[u8]) -> Result<PostOut, AppError> {
+    let body: PostBody = serde_json::from_slice(body).map_err(|_| AppError::bad("bad json"))?;
+    app.hub.with_store(fabric, |store| {
+        let world = store.world();
+        let user = resolve_user(&world, Some(&body.user))?.clone();
+        let target = if let Some(coord) = body
+            .coord
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parse_target(coord).map_err(AppError::bad)?
+        } else {
+            let suggestion = rank::suggest(&world.threads, &user.interests, &body.text, Utc::now());
+            Target::Scroll(suggestion.coord)
+        };
+        let placed = store.place(Post {
             author: user.name,
             text: body.text,
             target,
             now: Utc::now(),
+        })?;
+        Ok(PostOut {
+            ok: true,
+            id: post_id(placed.coord),
+            lane: lane_id(placed.thread),
+            coord: format_coord(placed.coord),
+            thread: thread_key(placed.thread),
+            title: placed.title,
+            topic: placed.topic,
+            new_thread: placed.new_thread,
         })
-        .map_err(AppError::from)?;
-    Ok(Json(PostOut {
-        ok: true,
-        id: post_id(placed.coord),
-        lane: lane_id(placed.thread),
-        coord: format_coord(placed.coord),
-        thread: thread_key(placed.thread),
-        title: placed.title,
-        topic: placed.topic,
-        new_thread: placed.new_thread,
-    }))
+    })?
 }
 
-async fn reset(State(app): State<AppState>) -> Result<Json<serde_json::Value>, AppError> {
-    let mut store = lock(&app)?;
-    store.reseed(Utc::now()).map_err(AppError::from)?;
-    Ok(Json(serde_json::json!({"ok": true})))
+fn reset(app: &AppState, fabric: Option<&str>) -> Result<serde_json::Value, AppError> {
+    if fabric.is_some() {
+        return Err(AppError::bad("reset is only for the demo fabric"));
+    }
+    app.hub.with_store(None, |store| {
+        store.reseed(Utc::now())?;
+        Ok(serde_json::json!({"ok": true}))
+    })?
 }
 
-fn lock(app: &AppState) -> Result<std::sync::MutexGuard<'_, Store>, AppError> {
-    app.store
-        .lock()
-        .map_err(|_| AppError::server("store lock poisoned"))
+#[derive(Deserialize)]
+struct CreateBody {
+    name: Option<String>,
+}
+
+fn create_empty(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<serde_json::Value, AppError> {
+    let parsed: CreateBody = serde_json::from_slice(body).map_err(|_| AppError::bad("bad json"))?;
+    let requested = parsed
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    create_named(app, fabric, headers, requested, None)
+}
+
+fn upload_fabric(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+    name: Option<&str>,
+) -> Result<serde_json::Value, AppError> {
+    let requested = name.map(str::trim).filter(|name| !name.is_empty());
+    create_named(app, fabric, headers, requested, Some(body))
+}
+
+fn create_named(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    requested: Option<&str>,
+    upload: Option<&[u8]>,
+) -> Result<serde_json::Value, AppError> {
+    if fabric.is_some() {
+        return Err(AppError::bad("create a fabric from the server root"));
+    }
+    if !app.auth.plot_holder_check(&bearer(headers)) {
+        return Err(AppError::forbidden());
+    }
+    let ip = client_key(headers);
+    let name = match upload {
+        Some(bytes) => app.hub.create_upload(requested, bytes, &ip)?,
+        None => app.hub.create_empty(requested, &ip)?,
+    };
+    Ok(serde_json::json!({"ok": true, "name": name}))
+}
+
+impl Route {
+    fn is_post(&self) -> bool {
+        matches!(
+            self,
+            Route::PostMessage | Route::Reset | Route::Create | Route::Upload
+        )
+    }
+
+    fn is_page(&self) -> bool {
+        matches!(
+            self,
+            Route::Home | Route::Lane(_) | Route::Post(_) | Route::Download { .. }
+        )
+    }
+}
+
+fn method_not_allowed() -> Response {
+    (StatusCode::METHOD_NOT_ALLOWED, "method").into_response()
+}
+
+fn public_prefix(fabric: Option<&str>) -> String {
+    match fabric {
+        Some(name) => format!("/f/{name}"),
+        None => String::new(),
+    }
+}
+
+fn fabric_home(fabric: Option<&str>) -> String {
+    match fabric {
+        Some(name) => format!("/f/{name}/"),
+        None => "/".into(),
+    }
+}
+
+fn bearer(headers: &HeaderMap) -> String {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return String::new();
+    };
+    let value = value.trim();
+    let Some(token) = value
+        .strip_prefix("Bearer ")
+        .or_else(|| value.strip_prefix("bearer "))
+    else {
+        return String::new();
+    };
+    token.trim().to_string()
+}
+
+fn client_key(headers: &HeaderMap) -> String {
+    let Some(value) = header_token(headers, "x-forwarded-for") else {
+        return "local".into();
+    };
+    if value.len() <= 64
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':'))
+    {
+        value
+    } else {
+        "local".into()
+    }
+}
+
+fn query_map(uri: &Uri) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let Some(query) = uri.query() else {
+        return out;
+    };
+    for pair in query.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        out.insert(percent_decode(key), percent_decode(value));
+    }
+    out
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        if bytes[index] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[index]);
+        }
+        index += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn thread_key_from(input: &str) -> Result<String, AppError> {
@@ -346,23 +610,52 @@ fn resolve_user<'a>(
     })
 }
 
-fn snapshot(store: &Store, user_query: Option<&str>) -> Result<StateDto, AppError> {
+struct FabricView {
+    fabric: String,
+    fabrics: Vec<FabricDto>,
+    fork: String,
+    demo: bool,
+}
+
+fn snapshot(
+    store: &Store,
+    user_query: Option<&str>,
+    meta: &FabricView,
+) -> Result<StateDto, AppError> {
     let world = store.world();
-    let user = resolve_user(&world, user_query)?;
+    let (viewer, interests) = if world.users.is_empty() {
+        (
+            ViewerDto {
+                id: String::new(),
+                name: "Guest".into(),
+                blurb: String::new(),
+                interests: Vec::new(),
+            },
+            Vec::new(),
+        )
+    } else {
+        let user = resolve_user(&world, user_query)?;
+        let interests = user.interests.clone();
+        (viewer_dto(&world, user), interests)
+    };
     let now = Utc::now();
     let feed = rank::build_feed(
         &world.threads,
-        &user.interests,
+        &interests,
         now,
         rank::AUTHOR_CAP,
         rank::MAX_THREADS,
     );
-    let map = rank::map_of(&world.threads, &user.interests);
+    let map = rank::map_of(&world.threads, &interests);
     Ok(StateDto {
         file: store.path().display().to_string(),
+        fabric: meta.fabric.clone(),
+        fabrics: meta.fabrics.clone(),
+        fork: meta.fork.clone(),
+        demo: meta.demo,
         cap: rank::AUTHOR_CAP,
         loud_at: rank::LOUD_AT,
-        viewer: viewer_dto(&world, user),
+        viewer,
         users: world
             .users
             .iter()
@@ -494,6 +787,12 @@ impl AppError {
     fn missing() -> Self {
         Self::status(StatusCode::NOT_FOUND, "That link doesn't go anywhere.")
     }
+    fn forbidden() -> Self {
+        Self::status(
+            StatusCode::FORBIDDEN,
+            "Founding plot holders in Tessera can create fabrics.",
+        )
+    }
     fn server(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -504,6 +803,23 @@ impl AppError {
         Self {
             status,
             message: message.into(),
+        }
+    }
+}
+
+impl From<FabricError> for AppError {
+    fn from(err: FabricError) -> Self {
+        match err {
+            FabricError::Bad(message) => AppError::bad(message),
+            FabricError::Conflict(message) => AppError::status(StatusCode::CONFLICT, message),
+            FabricError::Limited(message) => {
+                AppError::status(StatusCode::TOO_MANY_REQUESTS, message)
+            }
+            FabricError::Forbidden => AppError::forbidden(),
+            FabricError::Missing => {
+                AppError::status(StatusCode::NOT_FOUND, "That fabric doesn't exist.")
+            }
+            FabricError::Io(err) => AppError::server(err.to_string()),
         }
     }
 }
@@ -527,6 +843,10 @@ impl IntoResponse for AppError {
 #[derive(Serialize)]
 struct StateDto {
     file: String,
+    fabric: String,
+    fabrics: Vec<FabricDto>,
+    fork: String,
+    demo: bool,
     cap: usize,
     loud_at: usize,
     viewer: ViewerDto,
@@ -534,6 +854,12 @@ struct StateDto {
     feed: Vec<FeedThreadDto>,
     lanes: Vec<LaneDto>,
     map: Vec<MapDto>,
+}
+
+#[derive(Clone, Serialize)]
+struct FabricDto {
+    name: String,
+    label: String,
 }
 
 #[derive(Serialize)]
@@ -718,14 +1044,20 @@ fn post_share(thread: &crate::model::Thread, message: &Message) -> Share {
     }
 }
 
-fn render_page(share: &Share, og_url: &str) -> Html<String> {
+fn render_page(share: &Share, og_url: &str, fabric: Option<&str>) -> Html<String> {
     let html = INDEX
         .replace("%%TITLE%%", &escape_html(&share.title))
         .replace("%%DESCRIPTION%%", &escape_html(&share.description))
         .replace("%%OG_TITLE%%", &escape_html(&share.og_title))
         .replace("%%OG_DESCRIPTION%%", &escape_html(&share.description))
         .replace("%%OG_TYPE%%", share.og_type)
-        .replace("%%OG_URL%%", &escape_html(og_url));
+        .replace("%%OG_URL%%", &escape_html(og_url))
+        .replace("%%FABRIC%%", &escape_html(fabric.unwrap_or("")))
+        .replace("%%HOME%%", &escape_html(&fabric_home(fabric)))
+        .replace(
+            "%%FORK%%",
+            &escape_html(&format!("{}/chat.phext", public_prefix(fabric))),
+        );
     Html(html)
 }
 
@@ -830,6 +1162,9 @@ mod tests {
         assert!(page.contains("id=\"details\""));
         assert!(page.contains("id=\"text\""));
         assert!(page.contains("copylink"));
+        assert!(page.contains("https://mirrorborn.us"));
+        assert!(page.contains("Founding plot holders in Tessera can create fabrics."));
+        assert!(!page.contains("phext.io"));
         assert!(page.contains("%%OG_TITLE%%"));
         assert!(page.contains("%%OG_DESCRIPTION%%"));
         assert!(!page.contains("Coordinate map"));
@@ -851,24 +1186,38 @@ mod http_tests {
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
-    struct Temp(std::path::PathBuf);
+    struct Temp {
+        dir: std::path::PathBuf,
+    }
     impl Drop for Temp {
         fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
+            let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
 
     fn app() -> (Router, Temp) {
-        let path = std::env::temp_dir().join(format!(
+        let dir = std::env::temp_dir().join(format!(
             "lanes-route-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let store = Store::open(&path).unwrap();
-        let state = AppState {
-            store: Arc::new(Mutex::new(store)),
-        };
-        (router(state), Temp(path))
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::with_auth(
+            dir.join("chat.phext"),
+            Arc::new(crate::auth::AdminTokenCheck::from_token("plot-secret")),
+        )
+        .unwrap();
+        (router(state), Temp { dir })
+    }
+
+    fn bearer(token: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri("/api/fabrics")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(r#"{"name":"notes"}"#))
+            .unwrap()
     }
 
     async fn send(app: &Router, request: Request<Body>) -> (StatusCode, String) {
@@ -1025,7 +1374,7 @@ mod http_tests {
         let json: serde_json::Value = serde_json::from_str(&again).unwrap();
         assert_eq!(json["highlight"], id);
 
-        let reopened = Store::open(&file.0).unwrap();
+        let reopened = Store::open(file.dir.join("chat.phext")).unwrap();
         let world = reopened.world();
         let (_, message) = world.find_post(&id).unwrap();
         assert_eq!(message.text, "say \"hello\" <b>");
@@ -1047,5 +1396,97 @@ mod http_tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("property=\"og:url\" content=\"\""));
         assert!(!body.contains("bad host"));
+        assert!(body.contains("https://mirrorborn.us"));
+        assert!(!body.contains("phext.io"));
+    }
+
+    #[tokio::test]
+    async fn fork_download_is_open_and_a_lane_fork_is_only_that_lane() {
+        let (app, _file) = app();
+        let (status, headers, body) = send_parts(&app, get("/chat.phext")).await;
+        assert_eq!(status, StatusCode::OK);
+        let disposition = headers
+            .get(header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(disposition.starts_with("attachment; filename=\"phext-lanes-"));
+        assert!(disposition.ends_with(".phext\""));
+        assert!(body.contains("north-wall ferns"));
+        assert!(body.contains("starter is slow"));
+
+        let (status, _headers, lane) = send_parts(&app, get("/l/kcre66i9s/chat.phext")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(lane.contains("north-wall ferns"));
+        assert!(!lane.contains("starter is slow"));
+    }
+
+    #[tokio::test]
+    async fn creating_a_fabric_requires_the_plot_check() {
+        let (app, file) = app();
+        let (status, body) = send(&app, get("/api/fabrics/access")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("\"create\":false"));
+
+        let (status, body) = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/fabrics")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"notes"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(body.contains("Founding plot holders in Tessera can create fabrics."));
+        assert!(!file.dir.join("fabrics/notes.phext").exists());
+
+        let (status, body) = send(&app, bearer("nope")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(!file.dir.join("fabrics/notes.phext").exists());
+
+        let (status, body) = send(&app, bearer("plot-secret")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(file.dir.join("fabrics/notes.phext").exists());
+
+        let (status, page) = send(&app, get("/f/notes/")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("data-fabric=\"notes\""));
+        assert!(page.contains("href=\"/f/notes/chat.phext\""));
+        assert!(page.contains("https://mirrorborn.us"));
+        let (status, home) = send(&app, get("/l/kcre66i9s")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(home.contains("data-fabric=\"\""));
+        assert!(home.contains("href=\"/chat.phext\""));
+        assert!(!home.contains("href=\"/f/"));
+
+        let (status, body) = send(&app, bearer("plot-secret")).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        let (status, body) = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/fabrics")
+                .header("authorization", "Bearer plot-secret")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"../x"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(!file.dir.join("x.phext").exists());
+    }
+
+    async fn send_parts(
+        app: &Router,
+        request: Request<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
     }
 }

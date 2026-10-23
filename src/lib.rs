@@ -6,10 +6,12 @@
 //! those interests and by recency, then keeps any single author to a small
 //! number of lines.
 
+pub mod auth;
 pub mod calm;
 pub mod config;
 pub mod coord;
 pub mod error;
+pub mod fabric;
 pub mod link;
 pub mod model;
 pub mod rank;

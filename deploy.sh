@@ -317,8 +317,32 @@ main() {
   local service_group
   service_group=$(id -gn "$SERVICE_USER")
   sudo mkdir -p "$DATA_DIR"
-  sudo chown "${SERVICE_USER}:${service_group}" "$DATA_DIR"
+  local fabrics_dir="${DATA_DIR}/fabrics"
+  sudo mkdir -p "$fabrics_dir"
+  sudo chown "${SERVICE_USER}:${service_group}" "$DATA_DIR" "$fabrics_dir"
   local data_file="${DATA_DIR}/chat.phext"
+  local token_file="/etc/phext-lanes/admin.env"
+  if sudo test -f "$token_file"; then
+    printf 'Keeping %s\n' "$token_file"
+  else
+    local token token_tmp old_umask
+    token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n' | tr 'A-F' 'a-f')
+    if [[ ! "$token" =~ ^[0-9a-f]{64}$ ]]; then
+      die "could not generate an admin token"
+    fi
+    old_umask=$(umask)
+    umask 077
+    token_tmp=$(mktemp)
+    printf 'LANES_ADMIN_TOKEN=%s\n' "$token" >"$token_tmp"
+    umask "$old_umask"
+    unset token
+    sudo mkdir -p /etc/phext-lanes
+    sudo cp "$token_tmp" "$token_file"
+    rm -f "$token_tmp"
+    sudo chown root:root "$token_file"
+    sudo chmod 600 "$token_file"
+    printf 'Wrote %s (token not printed). The service reads LANES_ADMIN_TOKEN from it.\n' "$token_file"
+  fi
   if [[ -s "$data_file" ]]; then
     printf 'Keeping existing chat data at %s\n' "$data_file"
   else
@@ -348,6 +372,7 @@ WorkingDirectory=${APP_DIR}
 Environment=LANES_HOST=127.0.0.1
 Environment=LANES_PORT=${PORT}
 Environment=LANES_FILE=${data_file}
+EnvironmentFile=-/etc/phext-lanes/admin.env
 ExecStart=${APP_DIR}/target/release/lanes --host 127.0.0.1 --port ${PORT} --file ${data_file}
 Restart=on-failure
 RestartSec=2
@@ -402,6 +427,7 @@ server {
     listen 80;
     listen [::]:80;
     server_name ${DOMAIN};
+    client_max_body_size 6M;
 
     location / {
         proxy_pass http://127.0.0.1:${PORT};
@@ -470,6 +496,42 @@ EOF
       printf 'Restored %s from %s\n' "$available" "$site_backup" >&2
     fi
   }
+
+  if [[ -r "$available" ]]; then
+    if ! grep -qF "client_max_body_size 6M;" "$available"; then
+      if [[ -z "$site_backup" && "$site_created" != "1" ]]; then
+        site_backup="${available}.bak-${stamp}"
+        sudo cp -a "$available" "$site_backup"
+        printf 'Backed up %s to %s\n' "$available" "$site_backup"
+      fi
+      local limit_tmp
+      limit_tmp=$(mktemp)
+      awk '
+        $1 == "server_name" { print; print "    client_max_body_size 6M;"; next }
+        { print }
+      ' "$available" >"$limit_tmp"
+      sudo cp "$limit_tmp" "$available"
+      rm -f "$limit_tmp"
+      nginx_changed=1
+    fi
+  elif sudo test -r "$available"; then
+    if ! sudo grep -qF "client_max_body_size 6M;" "$available"; then
+      if [[ -z "$site_backup" && "$site_created" != "1" ]]; then
+        site_backup="${available}.bak-${stamp}"
+        sudo cp -a "$available" "$site_backup"
+        printf 'Backed up %s to %s\n' "$available" "$site_backup"
+      fi
+      local limit_tmp
+      limit_tmp=$(mktemp)
+      sudo awk '
+        $1 == "server_name" { print; print "    client_max_body_size 6M;"; next }
+        { print }
+      ' "$available" | tee "$limit_tmp" >/dev/null
+      sudo cp "$limit_tmp" "$available"
+      rm -f "$limit_tmp"
+      nginx_changed=1
+    fi
+  fi
 
   if [[ "$nginx_changed" == "1" ]]; then
     if ! sudo nginx -t; then
@@ -558,6 +620,8 @@ EOF
   printf '  user:       %s\n' "$SERVICE_USER"
   printf '  listen:     127.0.0.1:%s\n' "$PORT"
   printf '  data:       %s\n' "$data_file"
+  printf '  fabrics:    %s\n' "$fabrics_dir"
+  printf '  admin:      %s\n' "$token_file"
   printf '  nginx:      %s (%s)\n' "$available" "$nginx_state"
   printf '  nginx -t:   ok\n'
   printf '  local:      %s\n' "$local_code"

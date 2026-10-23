@@ -18,8 +18,10 @@ use crate::coord::{
 };
 use crate::error::Error;
 use crate::fabric::{self, day_stamp, download_filename, FabricError, ParsedRoute, Route};
+use crate::limit::{Bucket, Limiter};
 use crate::link::{lane_id, post_id, section_lane_id};
 use crate::model::{self, preview, Message};
+use crate::oauth::{self, Oauth};
 use crate::rank::{self, Feed, MapEntry};
 use crate::store::{Post, Store};
 
@@ -31,6 +33,8 @@ const PAGE: usize = 40;
 pub struct AppState {
     hub: Arc<fabric::Hub>,
     auth: Arc<dyn PlotHolderCheck>,
+    oauth: Arc<Oauth>,
+    limits: Arc<Limiter>,
 }
 
 impl AppState {
@@ -38,6 +42,8 @@ impl AppState {
         Ok(Self {
             hub: Arc::new(fabric::Hub::open(path)?),
             auth: Arc::new(AdminTokenCheck::from_env()),
+            oauth: Arc::new(Oauth::from_env()),
+            limits: Arc::new(Limiter::standard()),
         })
     }
 
@@ -45,9 +51,25 @@ impl AppState {
         path: std::path::PathBuf,
         auth: Arc<dyn PlotHolderCheck>,
     ) -> Result<Self, Error> {
+        Self::with_gates(
+            path,
+            auth,
+            Arc::new(Oauth::test_ready()),
+            Arc::new(Limiter::standard()),
+        )
+    }
+
+    fn with_gates(
+        path: std::path::PathBuf,
+        auth: Arc<dyn PlotHolderCheck>,
+        oauth: Arc<Oauth>,
+        limits: Arc<Limiter>,
+    ) -> Result<Self, Error> {
         Ok(Self {
             hub: Arc::new(fabric::Hub::open(path)?),
             auth,
+            oauth,
+            limits,
         })
     }
 }
@@ -71,6 +93,11 @@ pub async fn serve(path: std::path::PathBuf, host: &str, port: u16) -> Result<()
         .hub
         .with_store(None, |store| store.path().display().to_string())
         .unwrap_or_else(|_| "chat.phext".into());
+    if state.oauth.ready() {
+        println!("sign-in  ready");
+    } else {
+        println!("sign-in  not configured; writes are closed");
+    }
     let app = router(state);
     let addr = listen_addr(host, port);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -177,8 +204,17 @@ fn handle(
             let coord = query.get("coord").map(String::as_str).unwrap_or("");
             Ok(scroll(app, fabric, coord)?)
         }
-        Route::PostMessage => Ok(Json(post_message(app, fabric, body)?).into_response()),
-        Route::Reset => Ok(Json(reset(app, fabric)?).into_response()),
+        Route::PostMessage => Ok(Json(post_message(app, fabric, headers, body)?).into_response()),
+        Route::Reset => Ok(Json(reset(app, fabric, headers)?).into_response()),
+        Route::Session => Ok(session_view(app, headers)),
+        Route::AuthStart(provider) => auth_start(
+            app,
+            headers,
+            provider,
+            query.get("next").map(String::as_str).unwrap_or("/"),
+        ),
+        Route::AuthCallback(provider) => auth_callback(app, headers, provider, &query),
+        Route::Logout => logout(app, headers),
         Route::Access => Ok(Json(serde_json::json!({
             "create": app.auth.plot_holder_check(&bearer(headers)),
         }))
@@ -404,13 +440,19 @@ struct PostBody {
     coord: Option<String>,
 }
 
-fn post_message(app: &AppState, fabric: Option<&str>, body: &[u8]) -> Result<PostOut, AppError> {
+fn post_message(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<PostOut, AppError> {
+    let session = guard_write(app, headers)?;
     let body: PostBody = serde_json::from_slice(body).map_err(|_| AppError::bad("bad json"))?;
     app.hub.with_store(fabric, |store| {
-        let (author, target) = {
+        let target = {
             let world = store.world();
             let user = resolve_user(world, Some(&body.user))?.clone();
-            let target = if let Some(coord) = body
+            if let Some(coord) = body
                 .coord
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
@@ -420,11 +462,11 @@ fn post_message(app: &AppState, fabric: Option<&str>, body: &[u8]) -> Result<Pos
                 let suggestion =
                     rank::suggest(&world.threads, &user.interests, &body.text, Utc::now());
                 Target::Scroll(suggestion.coord)
-            };
-            (user.name, target)
+            }
         };
         let placed = store.place(Post {
-            author,
+            author: session.handle.clone(),
+            who: session.who.clone(),
             text: body.text,
             target,
             now: Utc::now(),
@@ -442,7 +484,12 @@ fn post_message(app: &AppState, fabric: Option<&str>, body: &[u8]) -> Result<Pos
     })?
 }
 
-fn reset(app: &AppState, fabric: Option<&str>) -> Result<serde_json::Value, AppError> {
+fn reset(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+) -> Result<serde_json::Value, AppError> {
+    let _session = guard_write(app, headers)?;
     if fabric.is_some() {
         return Err(AppError::bad("reset is only for the demo fabric"));
     }
@@ -493,6 +540,7 @@ fn create_named(
     if fabric.is_some() {
         return Err(AppError::bad("create a fabric from the server root"));
     }
+    let _session = guard_write(app, headers)?;
     if !app.auth.plot_holder_check(&bearer(headers)) {
         return Err(AppError::forbidden());
     }
@@ -508,7 +556,7 @@ impl Route {
     fn is_post(&self) -> bool {
         matches!(
             self,
-            Route::PostMessage | Route::Reset | Route::Create | Route::Upload
+            Route::PostMessage | Route::Reset | Route::Create | Route::Upload | Route::Logout
         )
     }
 
@@ -556,18 +604,203 @@ fn bearer(headers: &HeaderMap) -> String {
 }
 
 fn client_key(headers: &HeaderMap) -> String {
-    let Some(value) = header_token(headers, "x-forwarded-for") else {
-        return "local".into();
-    };
-    if value.len() <= 64
-        && value
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':'))
-    {
-        value
-    } else {
-        "local".into()
+    for name in ["x-real-ip", "x-forwarded-for"] {
+        if let Some(value) = header_token(headers, name) {
+            if value.len() <= 64
+                && value
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | ':'))
+            {
+                return value;
+            }
+        }
     }
+    "local".into()
+}
+
+fn guard_auth(app: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+    if !app.oauth.ready() {
+        return Err(AppError::status(
+            StatusCode::FORBIDDEN,
+            "Sign-in is not set up yet.",
+        ));
+    }
+    if app
+        .limits
+        .hit(Bucket::AuthIp, &client_key(headers))
+        .is_err()
+    {
+        return Err(AppError::status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests.",
+        ));
+    }
+    Ok(())
+}
+
+fn guard_write(app: &AppState, headers: &HeaderMap) -> Result<oauth::Session, AppError> {
+    if !app.oauth.ready() {
+        return Err(AppError::status(
+            StatusCode::FORBIDDEN,
+            "Sign-in is not set up yet.",
+        ));
+    }
+    if app
+        .limits
+        .hit(Bucket::WriteIp, &client_key(headers))
+        .is_err()
+    {
+        return Err(AppError::status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests.",
+        ));
+    }
+    let session = app
+        .oauth
+        .read_session(&oauth::cookie_from_headers(headers))
+        .ok_or_else(|| AppError::status(StatusCode::UNAUTHORIZED, "Sign in to do that."))?;
+    let csrf = headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !app.oauth.csrf_matches(&session, csrf) {
+        return Err(AppError::status(
+            StatusCode::FORBIDDEN,
+            "That request did not match this sign-in.",
+        ));
+    }
+    if app.limits.hit(Bucket::WriteAccount, &session.who).is_err() {
+        return Err(AppError::status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests.",
+        ));
+    }
+    Ok(session)
+}
+
+fn session_view(app: &AppState, headers: &HeaderMap) -> Response {
+    let session = app.oauth.read_session(&oauth::cookie_from_headers(headers));
+    Json(serde_json::json!({
+        "ready": app.oauth.ready(),
+        "signed_in": session.is_some(),
+        "handle": session.as_ref().map(|item| item.handle.as_str()).unwrap_or(""),
+        "csrf": session.as_ref().map(|item| item.csrf.as_str()).unwrap_or(""),
+        "providers": app.oauth.providers(),
+    }))
+    .into_response()
+}
+
+fn auth_start(
+    app: &AppState,
+    headers: &HeaderMap,
+    provider: &str,
+    next: &str,
+) -> Result<Response, AppError> {
+    guard_auth(app, headers)?;
+    let (url, pending) = app
+        .oauth
+        .authorize_url(provider, next)
+        .map_err(|message| AppError::status(StatusCode::FORBIDDEN, message))?;
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::LOCATION,
+        HeaderValue::from_str(&url).map_err(|_| AppError::server("bad redirect"))?,
+    );
+    out.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth::pending_cookie(&pending, app.oauth.cookie_secure()))
+            .map_err(|_| AppError::server("bad cookie"))?,
+    );
+    Ok((StatusCode::FOUND, out).into_response())
+}
+
+fn auth_callback(
+    app: &AppState,
+    headers: &HeaderMap,
+    provider: &str,
+    query: &HashMap<String, String>,
+) -> Result<Response, AppError> {
+    guard_auth(app, headers)?;
+    let code = query.get("code").map(String::as_str).unwrap_or("");
+    let state = query.get("state").map(String::as_str).unwrap_or("");
+    if query.contains_key("error") || code.is_empty() || state.is_empty() {
+        return Ok(auth_failed(app));
+    }
+    let pending = oauth::pending_token(&oauth::cookie_from_headers(headers)).unwrap_or_default();
+    match app.oauth.finish(provider, code, state, &pending) {
+        Ok((_identity, session, next)) => {
+            let mut out = HeaderMap::new();
+            out.insert(
+                header::LOCATION,
+                HeaderValue::from_str(&next).map_err(|_| AppError::server("bad redirect"))?,
+            );
+            out.append(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&oauth::session_cookie(&session, app.oauth.cookie_secure()))
+                    .map_err(|_| AppError::server("bad cookie"))?,
+            );
+            out.append(
+                header::SET_COOKIE,
+                HeaderValue::from_str(&oauth::clear_cookie(
+                    oauth::pending_cookie_name(),
+                    app.oauth.cookie_secure(),
+                ))
+                .map_err(|_| AppError::server("bad cookie"))?,
+            );
+            Ok((StatusCode::FOUND, out).into_response())
+        }
+        Err(_) => Ok(auth_failed(app)),
+    }
+}
+
+fn auth_failed(app: &AppState) -> Response {
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    if let Ok(cookie) = HeaderValue::from_str(&oauth::clear_cookie(
+        oauth::pending_cookie_name(),
+        app.oauth.cookie_secure(),
+    )) {
+        out.insert(header::SET_COOKIE, cookie);
+    }
+    (
+        StatusCode::BAD_REQUEST,
+        out,
+        Html(
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Lanes</title></head><body><p>Sign-in did not complete. <a href=\"/\">Back to Lanes</a></p></body></html>",
+        ),
+    )
+        .into_response()
+}
+
+fn logout(app: &AppState, headers: &HeaderMap) -> Result<Response, AppError> {
+    guard_auth(app, headers)?;
+    let session = app
+        .oauth
+        .read_session(&oauth::cookie_from_headers(headers))
+        .ok_or_else(|| AppError::status(StatusCode::UNAUTHORIZED, "Sign in to do that."))?;
+    let csrf = headers
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if !app.oauth.csrf_matches(&session, csrf) {
+        return Err(AppError::status(
+            StatusCode::FORBIDDEN,
+            "That request did not match this sign-in.",
+        ));
+    }
+    let mut out = HeaderMap::new();
+    out.insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&oauth::clear_cookie(
+            oauth::session_cookie_name(),
+            app.oauth.cookie_secure(),
+        ))
+        .map_err(|_| AppError::server("bad cookie"))?,
+    );
+    Ok((out, Json(serde_json::json!({"ok": true}))).into_response())
 }
 
 fn query_map(uri: &Uri) -> HashMap<String, String> {
@@ -1275,6 +1508,8 @@ mod tests {
         assert!(page.contains("copylink"));
         assert!(page.contains("https://mirrorborn.us"));
         assert!(page.contains("Founding plot holders in Tessera can create fabrics."));
+        assert!(page.contains("id=\"signin\""));
+        assert!(page.contains(">Sign in<"));
         assert!(!page.contains("phext.io"));
         assert!(page.contains("%%OG_TITLE%%"));
         assert!(page.contains("%%OG_DESCRIPTION%%"));
@@ -1324,14 +1559,28 @@ mod http_tests {
         (router(state), Temp { dir })
     }
 
+    fn with_session(builder: axum::http::request::Builder) -> axum::http::request::Builder {
+        builder
+            .header(
+                "cookie",
+                format!(
+                    "lanes_session={}",
+                    crate::oauth::Oauth::test_session_cookie()
+                ),
+            )
+            .header("x-csrf-token", crate::oauth::TEST_CSRF)
+    }
+
     fn bearer(token: &str) -> Request<Body> {
-        Request::builder()
-            .method("POST")
-            .uri("/api/fabrics")
-            .header("content-type", "application/json")
-            .header("authorization", format!("Bearer {token}"))
-            .body(Body::from(r#"{"name":"notes"}"#))
-            .unwrap()
+        with_session(
+            Request::builder()
+                .method("POST")
+                .uri("/api/fabrics")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}")),
+        )
+        .body(Body::from(r#"{"name":"notes"}"#))
+        .unwrap()
     }
 
     async fn send(app: &Router, request: Request<Body>) -> (StatusCode, String) {
@@ -1461,14 +1710,16 @@ mod http_tests {
         let (app, file) = app();
         let (status, body) = send(
             &app,
-            Request::builder()
-                .method("POST")
-                .uri("/api/post")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"user":"mira","text":"say \"hello\" <b>","coord":"1.2.1/1.1.2"}"#,
-                ))
-                .unwrap(),
+            with_session(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/post")
+                    .header("content-type", "application/json"),
+            )
+            .body(Body::from(
+                r#"{"user":"mira","text":"say \"hello\" <b>","coord":"1.2.1/1.1.2"}"#,
+            ))
+            .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -1552,8 +1803,8 @@ mod http_tests {
                 .unwrap(),
         )
         .await;
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert!(body.contains("Founding plot holders in Tessera can create fabrics."));
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body.contains("Sign in to do that."));
         assert!(!file.dir.join("fabrics/notes.phext").exists());
 
         let (status, body) = send(&app, bearer("nope")).await;
@@ -1580,13 +1831,15 @@ mod http_tests {
 
         let (status, body) = send(
             &app,
-            Request::builder()
-                .method("POST")
-                .uri("/api/fabrics")
-                .header("authorization", "Bearer plot-secret")
-                .header("content-type", "application/json")
-                .body(Body::from(r#"{"name":"../x"}"#))
-                .unwrap(),
+            with_session(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/fabrics")
+                    .header("authorization", "Bearer plot-secret")
+                    .header("content-type", "application/json"),
+            )
+            .body(Body::from(r#"{"name":"../x"}"#))
+            .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
@@ -1600,13 +1853,15 @@ mod http_tests {
     async fn upload(app: &Router, name: &str, doc: &str) {
         let (status, body) = send(
             app,
-            Request::builder()
-                .method("POST")
-                .uri(format!("/api/fabrics/upload?name={name}"))
-                .header("authorization", "Bearer plot-secret")
-                .header("content-type", "application/octet-stream")
-                .body(Body::from(doc.to_string()))
-                .unwrap(),
+            with_session(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/fabrics/upload?name={name}"))
+                    .header("authorization", "Bearer plot-secret")
+                    .header("content-type", "application/octet-stream"),
+            )
+            .body(Body::from(doc.to_string()))
+            .unwrap(),
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -1809,6 +2064,251 @@ mod http_tests {
         let (status, page) = send(&app, get("/f/notes/")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(page.contains("Nothing in this phext yet."));
+    }
+
+    fn app_with(oauth: crate::oauth::Oauth, limits: crate::limit::Limiter) -> (Router, Temp) {
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-route-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::with_gates(
+            dir.join("chat.phext"),
+            Arc::new(crate::auth::AdminTokenCheck::from_token("plot-secret")),
+            Arc::new(oauth),
+            Arc::new(limits),
+        )
+        .unwrap();
+        (router(state), Temp { dir })
+    }
+
+    fn set_cookie(headers: &axum::http::HeaderMap, name: &str) -> String {
+        headers
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(|value| {
+                let rest = value.strip_prefix(&format!("{name}="))?;
+                Some(rest.split(';').next().unwrap_or("").to_string())
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn reading_and_fork_stay_open_without_a_session() {
+        let (app, _file) = app();
+        let (status, body) = send(&app, get("/l/kcre66i9s")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Fern wall"));
+        let (status, _headers, fork) = send_parts(&app, get("/chat.phext")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(fork.contains("north-wall ferns"));
+        let (status, body) = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/post")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"user":"mira","text":"no session"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body.contains("Sign in to do that."));
+    }
+
+    #[tokio::test]
+    async fn unset_oauth_closes_writes_with_a_calm_notice() {
+        let (app, _file) = app_with(
+            crate::oauth::Oauth::closed(),
+            crate::limit::Limiter::standard(),
+        );
+        let (status, page) = send(&app, get("/")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(page.contains("Sign in"));
+        let (status, body) = send(
+            &app,
+            with_session(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/post")
+                    .header("content-type", "application/json"),
+            )
+            .body(Body::from(r#"{"user":"mira","text":"closed"}"#))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("Sign-in is not set up yet."));
+        let (status, _) = send(&app, get("/chat.phext")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn github_sign_in_sets_a_session_and_the_poster_identity() {
+        let (app, file) = app();
+        let (status, headers, _body) =
+            send_parts(&app, get("/auth/github?next=/l/kcre66i9s")).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let location = headers.get(header::LOCATION).unwrap().to_str().unwrap();
+        assert!(location.starts_with("https://github.com/login/oauth/authorize?"));
+        assert!(location.contains("code_challenge="));
+        assert!(location.contains("code_challenge_method=S256"));
+        assert!(location
+            .contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A7841%2Fauth%2Fgithub%2Fcallback"));
+        let pending_header = headers.get(header::SET_COOKIE).unwrap().to_str().unwrap();
+        assert!(pending_header.contains("HttpOnly"));
+        assert!(pending_header.contains("SameSite=Lax"));
+        assert!(pending_header.contains("Secure"));
+        let pending = set_cookie(&headers, "lanes_oauth");
+        let state = location
+            .split('&')
+            .find_map(|part| {
+                part.strip_prefix("state=")
+                    .or_else(|| part.split_once("state=").map(|(_, value)| value))
+            })
+            .unwrap()
+            .to_string();
+        let (status, headers, body) = send_parts(
+            &app,
+            Request::builder()
+                .uri(format!("/auth/github/callback?code=ok&state={state}"))
+                .header("cookie", format!("lanes_oauth={pending}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FOUND, "{body}");
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+            "/l/kcre66i9s"
+        );
+        let session = set_cookie(&headers, "lanes_session");
+        assert!(!session.is_empty());
+        let (status, me) = send(
+            &app,
+            Request::builder()
+                .uri("/api/session")
+                .header("cookie", format!("lanes_session={session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{me}");
+        let me: serde_json::Value = serde_json::from_str(&me).unwrap();
+        assert_eq!(me["handle"], "octocat");
+        assert_eq!(me["signed_in"], true);
+        let csrf = me["csrf"].as_str().unwrap();
+        let (status, posted) = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/post")
+                .header("content-type", "application/json")
+                .header("cookie", format!("lanes_session={session}"))
+                .header("x-csrf-token", csrf)
+                .body(Body::from(
+                    r#"{"user":"mira","text":"signed in note","coord":"1.2.1/1.1.1"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{posted}");
+        let saved = crate::store::Store::open(file.dir.join("chat.phext")).unwrap();
+        let raw = saved.doc();
+        assert!(raw.contains("author: octocat"));
+        assert!(raw.contains("who: github:100"));
+
+        let (status, _, denied) = send_parts(
+            &app,
+            Request::builder()
+                .uri("/auth/github/callback?code=ok&state=nope")
+                .header("cookie", format!("lanes_oauth={pending}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(denied.contains("Sign-in did not complete."));
+
+        let (status, hostile, _) =
+            send_parts(&app, get("/auth/github?next=https://evil.example")).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let hostile_pending = set_cookie(&hostile, "lanes_oauth");
+        let hostile_state = hostile
+            .get(header::LOCATION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let (status, back, _) = send_parts(
+            &app,
+            Request::builder()
+                .uri(format!(
+                    "/auth/github/callback?code=ok&state={hostile_state}"
+                ))
+                .header("cookie", format!("lanes_oauth={hostile_pending}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FOUND);
+        assert_eq!(back.get(header::LOCATION).unwrap().to_str().unwrap(), "/");
+    }
+
+    #[tokio::test]
+    async fn auth_and_writes_are_rate_limited() {
+        let (app, _file) = app_with(
+            crate::oauth::Oauth::test_ready(),
+            crate::limit::Limiter::with_caps(2, 2, 2),
+        );
+        for _ in 0..2 {
+            let (status, _, _) = send_parts(&app, get("/auth/github")).await;
+            assert_eq!(status, StatusCode::FOUND);
+        }
+        let (status, body) = send(&app, get("/auth/github")).await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+        assert!(body.contains("Too many requests."));
+        for _ in 0..2 {
+            let (status, body) = send(
+                &app,
+                with_session(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/post")
+                        .header("content-type", "application/json")
+                        .header("x-real-ip", "203.0.113.50"),
+                )
+                .body(Body::from(
+                    r#"{"user":"mira","text":"paced","coord":"1.1.1/1.1.1"}"#,
+                ))
+                .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let (status, body) = send(
+            &app,
+            with_session(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/post")
+                    .header("content-type", "application/json")
+                    .header("x-real-ip", "203.0.113.50"),
+            )
+            .body(Body::from(
+                r#"{"user":"mira","text":"paced again","coord":"1.1.1/1.1.1"}"#,
+            ))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
     }
 
     async fn send_parts(

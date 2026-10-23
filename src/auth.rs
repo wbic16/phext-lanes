@@ -55,7 +55,7 @@ impl PlotHolderCheck for AdminTokenCheck {
     }
 }
 
-fn token_eq(expected: &str, given: &str) -> bool {
+pub(crate) fn token_eq(expected: &str, given: &str) -> bool {
     let left = expected.as_bytes();
     let right = given.as_bytes();
     if left.is_empty() {

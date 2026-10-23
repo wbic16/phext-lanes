@@ -46,10 +46,23 @@ pub const PLAIN_AUTHOR: &str = "phext";
 pub struct Message {
     pub coord: Coordinate,
     pub author: String,
+    /// Stable poster, `github:123` or `google:sub`. Empty on older scrolls.
+    pub who: String,
     pub ts: DateTime<Utc>,
     pub text: String,
     /// Ordinary phext text. It is shown, and it is not a chat post.
     pub plain: bool,
+}
+
+impl Message {
+    /// Share caps follow the OAuth identity when the scroll has one.
+    pub fn poster_key(&self) -> &str {
+        if self.who.is_empty() {
+            &self.author
+        } else {
+            &self.who
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -73,6 +86,7 @@ pub enum Scroll {
     },
     Message {
         author: String,
+        who: String,
         ts: DateTime<Utc>,
         text: String,
     },
@@ -105,9 +119,19 @@ pub fn format_card(topic: &str, title: &str, keywords: &str) -> String {
 }
 
 pub fn format_message(author: &str, ts: DateTime<Utc>, text: &str) -> String {
+    format_message_as(author, "", ts, text)
+}
+
+pub fn format_message_as(author: &str, who: &str, ts: DateTime<Utc>, text: &str) -> String {
     let stamp = ts.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let who = coord::sanitize(who).replace(['\n', '\r'], "");
+    let who_line = if crate::oauth::valid_who(&who) {
+        format!("who: {who}\n")
+    } else {
+        String::new()
+    };
     format!(
-        "kind: message\nauthor: {}\nts: {stamp}\n---\n{}",
+        "kind: message\nauthor: {}\n{who_line}ts: {stamp}\n---\n{}",
         coord::one_line(author),
         coord::sanitize(text).trim_end_matches(['\n', '\r'])
     )
@@ -243,8 +267,15 @@ pub fn parse_scroll(raw: &str) -> Option<Scroll> {
             if author.is_empty() {
                 return None;
             }
+            let who = headers.get("who").cloned().unwrap_or_default();
+            let who = if crate::oauth::valid_who(&who) {
+                who
+            } else {
+                String::new()
+            };
             Some(Scroll::Message {
                 author,
+                who,
                 ts,
                 text: body,
             })
@@ -308,10 +339,12 @@ mod tests {
         match parse_scroll(&raw) {
             Some(Scroll::Message {
                 author,
+                who,
                 text,
                 ts: parsed,
             }) => {
                 assert_eq!(author, "Mira Quill");
+                assert!(who.is_empty());
                 assert_eq!(text, "line one\nline two");
                 assert_eq!(parsed, ts);
             }

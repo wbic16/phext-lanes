@@ -127,7 +127,7 @@ pub fn build_feed(
             if message.plain {
                 continue;
             }
-            *volume.entry(message.author.as_str()).or_default() += 1;
+            *volume.entry(message.poster_key()).or_default() += 1;
         }
     }
     let mut ranked: Vec<&Thread> = threads
@@ -163,14 +163,15 @@ pub fn build_feed(
             if message.plain {
                 continue;
             }
-            let limit = if volume.get(message.author.as_str()).copied().unwrap_or(0) >= LOUD_AT {
+            let key = message.poster_key().to_string();
+            let limit = if volume.get(key.as_str()).copied().unwrap_or(0) >= LOUD_AT {
                 cap
             } else {
                 usize::MAX
             };
-            let shown = shown_by_author.get(&message.author).copied().unwrap_or(0);
+            let shown = shown_by_author.get(&key).copied().unwrap_or(0);
             if shown < limit {
-                shown_by_author.insert(message.author.clone(), shown + 1);
+                shown_by_author.insert(key, shown + 1);
                 admitted.push(message);
             } else {
                 held.push(message);
@@ -500,6 +501,7 @@ mod tests {
         Message {
             coord: parse_coord(coord).unwrap(),
             author: author.into(),
+            who: String::new(),
             ts: now - Duration::minutes(minutes_ago),
             text: text.into(),
             plain: false,
@@ -752,5 +754,74 @@ mod tests {
         assert_eq!(feed.threads[0].title, "Fern wall");
         assert!(feed.lanes.is_empty());
         assert_eq!(admitted_by(&feed, "phext"), 0);
+    }
+
+    #[test]
+    fn share_caps_follow_the_oauth_identity() {
+        let now = fixed();
+        let interest = parse_coord("1.1.1/1.1.1/1.1.1").unwrap();
+        let mut same = Vec::new();
+        for scroll in 2..=9 {
+            let mut note = message(
+                &format!("1.1.1/1.1.1/1.1.{scroll}"),
+                if scroll % 2 == 0 { "Ann" } else { "Bea" },
+                scroll,
+                "again",
+                now,
+            );
+            note.who = "github:1".into();
+            same.push(note);
+        }
+        let hall = thread("1.1.1/1.1.1/1.1.1", "Hall", "", same);
+        let feed = build_feed(&[hall], &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        let admitted = feed.threads[0]
+            .admitted
+            .iter()
+            .filter(|message| message.who == "github:1")
+            .count();
+        assert_eq!(admitted, AUTHOR_CAP);
+
+        let mut split = Vec::new();
+        for (index, who) in ["github:1", "github:2"].iter().enumerate() {
+            for scroll in 2..=9 {
+                let mut note = message(
+                    &format!("1.{}.{}/1.1.1/1.1.{scroll}", index + 1, index + 1),
+                    "Ann",
+                    scroll,
+                    "again",
+                    now,
+                );
+                note.who = (*who).into();
+                split.push((index, note));
+            }
+        }
+        let left = thread(
+            "1.1.1/1.1.1/1.1.1",
+            "Left",
+            "",
+            split
+                .iter()
+                .filter(|(index, _)| *index == 0)
+                .map(|(_, note)| note.clone())
+                .collect(),
+        );
+        let right = thread(
+            "1.2.2/1.1.1/1.1.1",
+            "Right",
+            "",
+            split
+                .into_iter()
+                .filter(|(index, _)| *index == 1)
+                .map(|(_, note)| note)
+                .collect(),
+        );
+        let feed = build_feed(&[left, right], &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        let admitted = feed
+            .threads
+            .iter()
+            .flat_map(|thread| thread.admitted.iter())
+            .filter(|message| message.author == "Ann")
+            .count();
+        assert_eq!(admitted, AUTHOR_CAP * 2);
     }
 }

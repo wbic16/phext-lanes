@@ -128,6 +128,7 @@ impl World {
 
 pub struct Post {
     pub author: String,
+    pub who: String,
     pub text: String,
     pub target: Target,
     pub now: DateTime<Utc>,
@@ -293,7 +294,7 @@ impl Store {
             }
             (title, topic)
         };
-        let body = model::format_message(&author, post.now, &text);
+        let body = model::format_message_as(&author, &post.who, post.now, &text);
         doc = phext::insert(doc, coord, &body);
         self.persist(doc)?;
 
@@ -399,7 +400,12 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
                     cards.insert(key, (topic, title, keywords));
                     continue;
                 }
-                Scroll::Message { author, ts, text } => {
+                Scroll::Message {
+                    author,
+                    who,
+                    ts,
+                    text,
+                } => {
                     let key = thread_key(coord);
                     anchors
                         .entry(key.clone())
@@ -407,6 +413,7 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
                     messages.entry(key).or_default().push(Message {
                         coord,
                         author,
+                        who,
                         ts,
                         text,
                         plain: false,
@@ -427,6 +434,7 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
         plain.entry(key).or_default().push(Message {
             coord,
             author: model::PLAIN_AUTHOR.into(),
+            who: String::new(),
             ts: DateTime::<Utc>::UNIX_EPOCH,
             text,
             plain: true,
@@ -579,6 +587,7 @@ mod tests {
         let placed = store
             .place(Post {
                 author: seed::MIRA.into(),
+                who: String::new(),
                 text: "hello\u{0017}hidden".into(),
                 target: Target::Thread(parse_coord("1.2.1/1.1.1/1.1.1").unwrap()),
                 now: Utc::now(),
@@ -597,6 +606,7 @@ mod tests {
         let placed = store
             .place(Post {
                 author: "mira".into(),
+                who: String::new(),
                 text: "A new note about moss on the stone.".into(),
                 target: Target::Thread(parse_coord("1.2.1/1.1.1/1.1.1").unwrap()),
                 now: Utc::now(),

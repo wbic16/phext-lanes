@@ -210,6 +210,7 @@ fn post(
     };
     let placed = store.place(Post {
         author,
+        who: String::new(),
         text: text.to_string(),
         target,
         now: Utc::now(),

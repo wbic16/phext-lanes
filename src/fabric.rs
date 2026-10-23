@@ -66,6 +66,10 @@ pub enum Route {
     Access,
     Create,
     Upload,
+    Session,
+    AuthStart(String),
+    AuthCallback(String),
+    Logout,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +102,9 @@ pub fn parse_route(path: &str) -> Result<ParsedRoute, RouteError> {
     } else {
         (None, path)
     };
+    if fabric.is_some() && (rest.starts_with("auth/") || rest == "api/session") {
+        return Err(RouteError::Unknown);
+    }
     let route = match rest {
         "" => Route::Home,
         "chat.phext" => Route::Download { lane: None },
@@ -112,6 +119,12 @@ pub fn parse_route(path: &str) -> Result<ParsedRoute, RouteError> {
         "api/fabrics/access" => Route::Access,
         "api/fabrics" => Route::Create,
         "api/fabrics/upload" => Route::Upload,
+        "api/session" => Route::Session,
+        "auth/github" => Route::AuthStart("github".into()),
+        "auth/google" => Route::AuthStart("google".into()),
+        "auth/github/callback" => Route::AuthCallback("github".into()),
+        "auth/google/callback" => Route::AuthCallback("google".into()),
+        "auth/logout" => Route::Logout,
         other => parse_tail(other)?,
     };
     Ok(ParsedRoute { fabric, route })

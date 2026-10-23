@@ -20,7 +20,15 @@ Each thread, and each message inside it, has a quiet **link**. `/l/…` opens th
 
 The name at the top switches reader. Casey's feed opens on General, and he still only gets two lines, so the quieter voices stay visible. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
 
-**fork** downloads this phext. An open thread also has a fork of just that thread. The menu switches fabric. The default fabric keeps `/l/…` and `/p/…`. Another fabric lives at `/f/<name>/…`, in `data/fabrics/<name>.phext` locally and `/var/lib/phext-lanes/fabrics/<name>.phext` on the server. **create fabric** is for [founding plot holders in Tessera](https://mirrorborn.us). Until that check is connected, the server allows it only with the admin token in `/etc/phext-lanes/admin.env`, which `deploy.sh` creates on the server and does not print. Browsing and fork stay open.
+**fork** downloads this phext. An open thread also has a fork of just that thread. The menu switches fabric. The default fabric keeps `/l/…` and `/p/…`. Another fabric lives at `/f/<name>/…`, in `data/fabrics/<name>.phext` locally and `/var/lib/phext-lanes/fabrics/<name>.phext` on the server. **create fabric** is for [founding plot holders in Tessera](https://mirrorborn.us). Until that check is connected, the server allows it only with the admin token in `/etc/phext-lanes/admin.env`, which `deploy.sh` creates on the server and does not print. Browsing, permalinks, and fork stay open.
+
+**Sign in** is the quiet control in the header. Posting, replying, and creating a fabric need a GitHub or Google session. Creating a fabric still needs the plot key as well. If `/etc/phext-lanes/oauth.env` has no client credentials, those writes stay closed and the page says sign-in is not set up yet.
+
+On the server, `deploy.sh` creates that file mode `0600` and does not print the session secret. Fill in the four client lines, then `sudo systemctl restart phext-lanes` (or run `bash deploy.sh` again).
+
+GitHub: Settings → Developer settings → OAuth Apps → New OAuth App. Homepage `https://mc.phext.io`. Authorization callback URL `https://mc.phext.io/auth/github/callback`. Put the client id and secret in `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`.
+
+Google: Cloud Console → APIs & Services → Credentials → Create OAuth client ID → Web application. Authorized JavaScript origin `https://mc.phext.io`. Authorized redirect URI `https://mc.phext.io/auth/google/callback`. Put them in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. If the consent screen is in testing, add yourself as a test user. The consent screen needs the `openid`, `email`, and `profile` scopes.
 
 ## CLI
 

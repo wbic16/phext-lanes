@@ -170,6 +170,8 @@
     text-decoration: underline;
     text-underline-offset: 3px;
   }
+  #signin-choices { display: contents; }
+  #signin-choices[hidden] { display: none; }
   #toc {
     white-space: pre-wrap;
     font-family: ui-monospace, "Cascadia Mono", monospace;
@@ -225,6 +227,11 @@
         <select id="fabric" aria-label="Fabric"></select>
         <button type="button" class="quiet" id="create-fabric">create fabric</button>
         <a class="quiet fork" id="fork" href="%%FORK%%">fork</a>
+        <button type="button" class="quiet" id="signin">Sign in</button>
+        <span id="signin-choices" hidden>
+          <a class="quiet" id="signin-github" href="/auth/github">GitHub</a>
+          <a class="quiet" id="signin-google" href="/auth/google">Google</a>
+        </span>
         <select id="user" aria-label="You"></select>
         <button type="button" class="quiet" id="details" aria-pressed="false">details</button>
       </div>
@@ -273,6 +280,7 @@ const state = {
   feedShown: 40,
   tocKey: "",
   tocText: "",
+  session: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -322,6 +330,35 @@ function paintWhere() {
   } else {
     reason.textContent = "";
   }
+}
+
+function writeHeaders(extra) {
+  const headers = extra || {};
+  if (state.session && state.session.csrf) headers["x-csrf-token"] = state.session.csrf;
+  return headers;
+}
+
+function authNext() {
+  return encodeURIComponent(location.pathname + location.search);
+}
+
+function paintSignIn() {
+  const session = state.session || {};
+  const button = $("signin");
+  const choices = $("signin-choices");
+  choices.hidden = true;
+  if (session.signed_in) {
+    button.textContent = session.handle || "Sign out";
+    return;
+  }
+  button.textContent = "Sign in";
+}
+
+async function loadSession() {
+  const res = await fetch("/api/session");
+  const body = await res.json().catch(() => ({}));
+  state.session = body || {};
+  paintSignIn();
 }
 
 async function loadState() {
@@ -566,24 +603,44 @@ function renderFabrics(data) {
   }
 }
 
+function showCreateNote(kind) {
+  const note = $("create-note");
+  note.hidden = false;
+  note.replaceChildren();
+  if (kind === "signin") {
+    note.textContent = "Sign in to create a fabric.";
+    return;
+  }
+  note.append(el("a", {
+    href: "https://mirrorborn.us",
+    text: "Founding plot holders in Tessera can create fabrics.",
+  }));
+}
+
 async function refreshCreate() {
+  if (!state.session || !state.session.signed_in) {
+    showCreateNote("signin");
+    $("create-form").hidden = true;
+    return;
+  }
   const key = $("plot-key").value.trim();
   const headers = {};
   if (key) headers.authorization = "Bearer " + key;
   const res = await fetch(api("/api/fabrics/access"), { headers });
   const body = await res.json().catch(() => ({}));
   const allowed = Boolean(body.create);
-  $("create-note").hidden = allowed;
+  if (allowed) $("create-note").hidden = true;
+  else showCreateNote("plot");
   $("create-form").hidden = !allowed;
 }
 
 async function createEmpty() {
   const res = await fetch(api("/api/fabrics"), {
     method: "POST",
-    headers: {
+    headers: writeHeaders({
       "content-type": "application/json",
       authorization: "Bearer " + $("plot-key").value.trim(),
-    },
+    }),
     body: JSON.stringify({ name: $("fabric-name").value.trim() }),
   });
   const body = await res.json().catch(() => ({}));
@@ -610,10 +667,10 @@ async function uploadFabric() {
   if (name) path += "?name=" + encodeURIComponent(name);
   const res = await fetch(path, {
     method: "POST",
-    headers: {
+    headers: writeHeaders({
       "content-type": "application/octet-stream",
       authorization: "Bearer " + $("plot-key").value.trim(),
-    },
+    }),
     body: file,
   });
   const body = await res.json().catch(() => ({}));
@@ -825,11 +882,19 @@ async function place(event) {
     setStatus("Write a message first.", true);
     return;
   }
+  if (!state.session || !state.session.ready) {
+    setStatus("Sign-in is not set up yet.", false);
+    return;
+  }
+  if (!state.session.signed_in) {
+    setStatus("Sign in to do that.", true);
+    return;
+  }
   setStatus("", false);
   const coord = state.override ? state.override.thread : (state.suggestion && state.suggestion.coord) || "";
   const res = await fetch(api("/api/post"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: writeHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({ user: state.user, text, coord }),
   });
   const body = await res.json();
@@ -854,7 +919,7 @@ async function resetDemo(button) {
     }, 2500);
     return;
   }
-  const res = await fetch(api("/api/reset"), { method: "POST" });
+  const res = await fetch(api("/api/reset"), { method: "POST", headers: writeHeaders({}) });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     setStatus(body.error || "Reset failed", true);
@@ -905,6 +970,31 @@ $("user").addEventListener("change", () => {
     .catch((err) => setStatus(err.message, true));
 });
 
+$("signin").addEventListener("click", () => {
+  const session = state.session || {};
+  if (session.signed_in) {
+    fetch("/auth/logout", { method: "POST", headers: writeHeaders({}) })
+      .then(() => location.reload())
+      .catch((err) => setStatus(err.message, true));
+    return;
+  }
+  if (!session.ready || !(session.providers || []).length) {
+    setStatus("Sign-in is not set up yet.", false);
+    return;
+  }
+  const next = authNext();
+  if (session.providers.length === 1) {
+    location.assign("/auth/" + session.providers[0] + "?next=" + next);
+    return;
+  }
+  const choices = $("signin-choices");
+  $("signin-github").href = "/auth/github?next=" + next;
+  $("signin-google").href = "/auth/google?next=" + next;
+  $("signin-github").hidden = session.providers.indexOf("github") < 0;
+  $("signin-google").hidden = session.providers.indexOf("google") < 0;
+  choices.hidden = !choices.hidden;
+});
+
 $("details").addEventListener("click", () => {
   const on = !document.body.classList.contains("details");
   document.body.classList.toggle("details", on);
@@ -937,7 +1027,9 @@ window.addEventListener("popstate", () => {
   applyRoute().catch((err) => setStatus(err.message, true));
 });
 
-loadState()
+loadSession()
+  .catch(() => { state.session = { ready: false, providers: [] }; paintSignIn(); })
+  .then(() => loadState())
   .then(() => applyRoute())
   .then(() => runSuggest())
   .catch((err) => {

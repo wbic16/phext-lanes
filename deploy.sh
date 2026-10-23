@@ -81,7 +81,59 @@ port_is_foreign() {
   return 1
 }
 
+# 0 after this file gains the mc.phext.io request limit. 1 when it is already limited or unreadable.
+ensure_rate_limit() {
+  local file=$1
+  local insert_zone=0 insert_loc=0
+  local -a reader
+  if [[ -r "$file" ]]; then
+    reader=(grep -qF)
+  elif sudo test -r "$file"; then
+    reader=(sudo grep -qF)
+  else
+    return 1
+  fi
+  if ! "${reader[@]}" 'zone=lanes_mc_req:' "$file"; then
+    insert_zone=1
+  fi
+  if ! "${reader[@]}" 'limit_req zone=lanes_mc_req ' "$file"; then
+    insert_loc=1
+  fi
+  if [[ "$insert_zone" == "0" && "$insert_loc" == "0" ]]; then
+    return 1
+  fi
+  local tmp zone_line loc_line
+  tmp=$(mktemp)
+  # Pass the nginx variable through -v. An awk $name would be a field, not this text.
+  zone_line="limit_req_zone \$binary_remote_addr zone=lanes_mc_req:10m rate=10r/s;"
+  loc_line='        limit_req zone=lanes_mc_req burst=40 nodelay;'
+  local awk_prog='
+    NR == 1 && insert_zone == 1 {
+      print zone_line
+    }
+    /^[[:space:]]*location \/ \{[[:space:]]*$/ && insert_loc == 1 {
+      print
+      print loc_line
+      next
+    }
+    { print }
+  '
+  if [[ -r "$file" ]]; then
+    awk -v insert_zone="$insert_zone" -v insert_loc="$insert_loc" \
+      -v zone_line="$zone_line" -v loc_line="$loc_line" \
+      "$awk_prog" "$file" >"$tmp"
+  else
+    sudo awk -v insert_zone="$insert_zone" -v insert_loc="$insert_loc" \
+      -v zone_line="$zone_line" -v loc_line="$loc_line" \
+      "$awk_prog" "$file" | tee "$tmp" >/dev/null
+  fi
+  sudo cp "$tmp" "$file"
+  rm -f "$tmp"
+  return 0
+}
+
 # 0 when this file already proxies DOMAIN at PORT, including after certbot edits.
+
 site_matches() {
   local file=$1
   local domain=$2
@@ -322,10 +374,11 @@ main() {
   sudo chown "${SERVICE_USER}:${service_group}" "$DATA_DIR" "$fabrics_dir"
   local data_file="${DATA_DIR}/chat.phext"
   local token_file="/etc/phext-lanes/admin.env"
+  local old_umask
   if sudo test -f "$token_file"; then
     printf 'Keeping %s\n' "$token_file"
   else
-    local token token_tmp old_umask
+    local token token_tmp
     token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n' | tr 'A-F' 'a-f')
     if [[ ! "$token" =~ ^[0-9a-f]{64}$ ]]; then
       die "could not generate an admin token"
@@ -342,6 +395,36 @@ main() {
     sudo chown root:root "$token_file"
     sudo chmod 600 "$token_file"
     printf 'Wrote %s (token not printed). The service reads LANES_ADMIN_TOKEN from it.\n' "$token_file"
+  fi
+  local oauth_file="/etc/phext-lanes/oauth.env"
+  if sudo test -f "$oauth_file"; then
+    printf 'Keeping %s\n' "$oauth_file"
+  else
+    local session session_tmp
+    session=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n' | tr 'A-F' 'a-f')
+    if [[ ! "$session" =~ ^[0-9a-f]{64}$ ]]; then
+      die "could not generate a session secret"
+    fi
+    old_umask=$(umask)
+    umask 077
+    session_tmp=$(mktemp)
+    cat >"$session_tmp" <<EOF
+# GitHub and Google OAuth. Leave a client line blank to keep that provider off.
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+LANES_SESSION_SECRET=${session}
+LANES_COOKIE_SECURE=1
+EOF
+    umask "$old_umask"
+    unset session
+    sudo mkdir -p /etc/phext-lanes
+    sudo cp "$session_tmp" "$oauth_file"
+    rm -f "$session_tmp"
+    sudo chown root:root "$oauth_file"
+    sudo chmod 600 "$oauth_file"
+    printf 'Wrote %s (session secret not printed). Fill in the GitHub and Google client lines.\n' "$oauth_file"
   fi
   if [[ -s "$data_file" ]]; then
     printf 'Keeping existing chat data at %s\n' "$data_file"
@@ -372,6 +455,8 @@ WorkingDirectory=${APP_DIR}
 Environment=LANES_HOST=127.0.0.1
 Environment=LANES_PORT=${PORT}
 Environment=LANES_FILE=${data_file}
+Environment=LANES_PUBLIC_ORIGIN=https://${DOMAIN}
+EnvironmentFile=-/etc/phext-lanes/oauth.env
 EnvironmentFile=-/etc/phext-lanes/admin.env
 ExecStart=${APP_DIR}/target/release/lanes --host 127.0.0.1 --port ${PORT} --file ${data_file}
 Restart=on-failure
@@ -418,6 +503,7 @@ EOF
   cat >"$site_tmp" <<EOF
 # Managed by phext-lanes deploy.sh.
 # Reverse proxy for ${DOMAIN} only. Other sites are not edited.
+limit_req_zone \$binary_remote_addr zone=lanes_mc_req:10m rate=10r/s;
 map \$http_upgrade \$lanes_connection_upgrade {
     default upgrade;
     ''      close;
@@ -430,6 +516,7 @@ server {
     client_max_body_size 6M;
 
     location / {
+        limit_req zone=lanes_mc_req burst=40 nodelay;
         proxy_pass http://127.0.0.1:${PORT};
         proxy_http_version 1.1;
         proxy_set_header Host \$host;
@@ -531,6 +618,28 @@ EOF
       rm -f "$limit_tmp"
       nginx_changed=1
     fi
+  fi
+
+  local rate_missing=0
+  if [[ -r "$available" ]]; then
+    if ! grep -qF 'zone=lanes_mc_req:' "$available" || ! grep -qF 'limit_req zone=lanes_mc_req ' "$available"; then
+      rate_missing=1
+    fi
+  elif sudo test -r "$available"; then
+    if ! sudo grep -qF 'zone=lanes_mc_req:' "$available" || ! sudo grep -qF 'limit_req zone=lanes_mc_req ' "$available"; then
+      rate_missing=1
+    fi
+  fi
+  if [[ "$rate_missing" == "1" ]]; then
+    if [[ -z "$site_backup" && "$site_created" != "1" ]]; then
+      site_backup="${available}.bak-${stamp}"
+      sudo cp -a "$available" "$site_backup"
+      printf 'Backed up %s to %s\n' "$available" "$site_backup"
+    fi
+    if ! ensure_rate_limit "$available"; then
+      die "could not add the nginx rate limit for ${DOMAIN}"
+    fi
+    nginx_changed=1
   fi
 
   if [[ "$nginx_changed" == "1" ]]; then

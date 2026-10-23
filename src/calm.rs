@@ -123,6 +123,7 @@ mod tests {
         Message {
             coord: parse_coord("1.2.1/1.1.1/1.1.2").unwrap(),
             author: "Mira Quill".into(),
+            who: String::new(),
             ts: now() - Duration::minutes(5),
             text: text.into(),
             plain: false,

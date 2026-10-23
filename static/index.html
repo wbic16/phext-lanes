@@ -3,358 +3,197 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lanes — predictive multi-chat</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect fill='%231c2b24' width='32' height='32'/%3E%3Crect fill='%23f3ecdf' x='4' y='7' width='24' height='3'/%3E%3Crect fill='%23f3ecdf' x='4' y='14' width='16' height='3'/%3E%3Crect fill='%23c23b22' x='4' y='21' width='9' height='3'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,560;0,9..144,640;1,9..144,520&family=Outfit:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<title>Lanes</title>
 <style>
   :root {
-    --ink: #1c1914;
-    --muted: #5e564b;
-    --paper: #f6f1e6;
-    --paper-2: #efe6d4;
-    --spine: #e4eadf;
-    --rule: #d9d0bf;
-    --forest: #1c2b24;
-    --forest-2: #24382e;
-    --moss: #1f5c40;
-    --moss-soft: #d5e4d8;
-    --stamp: #a33b28;
-    --cream: #f3ecdf;
-    --shadow: 0 22px 50px rgba(0, 0, 0, 0.28);
-    --serif: Fraunces, "Iowan Old Style", Palatino, Georgia, serif;
-    --sans: Outfit, "Avenir Next", "Segoe UI", sans-serif;
-    --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", monospace;
+    --ink: #221f1b;
+    --muted: #7a736a;
+    --faint: #9a9288;
+    --paper: #f4f1ea;
+    --line: #e6e0d6;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
     min-height: 100vh;
     color: var(--ink);
-    font-family: var(--sans);
-    font-size: 16px;
+    background: var(--paper);
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    font-size: 18px;
     line-height: 1.45;
-    background:
-      radial-gradient(circle at 1px 1px, rgba(243, 236, 223, 0.07) 1px, transparent 0) 0 0 / 22px 22px,
-      #0e1210;
-    padding: 18px;
   }
   button, input, textarea, select { font: inherit; color: inherit; }
   button { cursor: pointer; }
-  :focus-visible { outline: 2px solid var(--stamp); outline-offset: 2px; }
-  .journal {
-    max-width: 1180px;
-    height: calc(100vh - 36px);
-    margin: 0 auto;
-    display: flex;
-    flex-direction: column;
-    background: var(--paper);
-    border-top: 4px solid var(--stamp);
-    box-shadow: var(--shadow);
-    min-height: 0;
-  }
-  .topbar {
-    display: flex;
-    gap: 22px;
-    align-items: flex-end;
-    justify-content: space-between;
-    background: var(--forest);
-    color: var(--cream);
-    padding: 16px 20px 14px;
-  }
-  .brand { display: flex; gap: 12px; align-items: center; min-width: 0; }
-  .mark { width: 32px; height: 32px; flex: none; }
-  .mark rect { fill: currentColor; }
-  .word { font-family: var(--serif); font-weight: 640; font-size: 1.7rem; line-height: 1; letter-spacing: -0.03em; }
-  .kicker { margin: 3px 0 0; color: #d5cbb8; font-size: 0.82rem; }
-  .who { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; min-width: 0; }
-  .who-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-  label.quiet { font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: #cbbfaa; }
-  select, .ghost {
-    background: transparent;
-    color: var(--cream);
-    border: 1px solid rgba(243, 236, 223, 0.35);
-    padding: 6px 8px;
-  }
-  select { min-width: 10rem; color-scheme: dark; background: var(--forest-2); }
-  .ghost { background: transparent; }
-  .ghost.armed { border-color: var(--stamp); color: #ffd0c6; }
-  .blurb { margin: 0; color: #d9d0c0; font-size: 0.88rem; text-align: right; }
-  .chips { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
-  .chip {
+  :focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
+  .sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
     border: 0;
-    background: rgba(243, 236, 223, 0.1);
-    color: var(--cream);
-    padding: 4px 8px;
-    font-family: var(--mono);
-    font-size: 0.72rem;
   }
-  .chip small { display: block; font-family: var(--sans); letter-spacing: 0; color: #d5cbb8; }
-  .pages {
-    flex: 1;
-    min-height: 0;
-    display: grid;
-    grid-template-columns: 280px minmax(0, 1fr) 340px;
+  .wrap {
+    max-width: 38rem;
+    margin: 0 auto;
+    padding: 12vh 1.5rem 11rem;
   }
-  .spine, .sheet, .room { min-height: 0; overflow: auto; }
-  .spine { background: var(--spine); padding: 16px 14px 24px; border-right: 1px solid var(--rule); }
-  .sheet { padding: 16px 18px 32px; }
-  .room { background: var(--paper-2); padding: 16px 16px 32px; border-left: 1px solid var(--rule); }
-  h2 {
-    font-family: var(--serif);
-    font-weight: 560;
-    font-size: 1.35rem;
-    margin: 0 0 4px;
-    letter-spacing: -0.02em;
+  header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1.5rem;
+    margin-bottom: 3.5rem;
   }
-  .deck { margin: 0 0 14px; color: var(--muted); font-size: 0.92rem; }
-  .topic-name {
-    margin: 16px 0 6px;
-    font-size: 0.78rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--moss);
+  .brand { font-size: 1.15rem; letter-spacing: -0.02em; }
+  .tools { display: flex; gap: 1.1rem; align-items: baseline; }
+  select, .quiet {
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--muted);
   }
-  .topic-name .coord { margin-left: 6px; }
-  .map-row {
-    display: block;
+  select { cursor: pointer; }
+  .quiet[aria-pressed="true"] { color: var(--ink); }
+  .item { border-bottom: 1px solid var(--line); }
+  .row {
+    display: flex;
+    gap: 1.25rem;
+    align-items: baseline;
     width: 100%;
     text-align: left;
     background: transparent;
     border: 0;
-    border-bottom: 1px solid rgba(28, 25, 20, 0.08);
-    padding: 8px 2px 9px;
+    padding: 1rem 0;
+    cursor: pointer;
   }
-  .map-row.is-open { background: rgba(31, 92, 64, 0.08); }
-  .map-title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-  .map-title strong { font-weight: 600; }
-  .bar {
-    display: block;
-    height: 3px;
-    margin: 6px 0 4px;
-    background: var(--moss);
-    width: calc((1 - var(--d)) * 100%);
-    min-width: 10px;
+  .title { flex: none; font-weight: 600; }
+  .preview {
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    color: #4a453f;
   }
-  .map-meta { color: var(--muted); font-size: 0.8rem; }
-  .coord { font-family: var(--mono); font-size: 0.75rem; color: var(--moss); }
-  .stamp {
-    display: inline-block;
-    border: 1.5px solid var(--stamp);
-    color: var(--stamp);
-    text-transform: uppercase;
-    letter-spacing: 0.14em;
-    font-size: 0.66rem;
-    font-weight: 600;
-    padding: 0.12rem 0.35rem;
-    transform: rotate(-2deg);
+  .meta, .coord { display: none; }
+  body.details .meta { display: block; }
+  body.details .coord { display: inline; }
+  .meta {
+    margin: -0.35rem 0 0.9rem;
+    color: var(--faint);
+    font-size: 0.82rem;
   }
-  form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 18px; }
-  textarea, #coord {
-    width: 100%;
-    background: #fffdf8;
-    border: 1px solid var(--rule);
-    padding: 10px 12px;
+  .reading { padding: 0.25rem 0 0.5rem; }
+  .msg { margin: 1.35rem 0 1.5rem; }
+  .by { margin: 0 0 0.2rem; color: var(--muted); font-size: 0.88rem; }
+  .msg p { margin: 0; white-space: pre-wrap; }
+  .held {
+    margin: 1.75rem 0 0;
+    color: var(--muted);
+    font-size: 0.95rem;
   }
-  textarea { min-height: 88px; resize: vertical; line-height: 1.45; }
-  #coord { font-family: var(--mono); font-size: 0.92rem; }
-  .suggest { display: flex; flex-direction: column; gap: 4px; }
-  #reason { margin: 0; color: var(--muted); font-size: 0.9rem; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .place {
-    background: var(--forest);
-    color: var(--cream);
-    border: 0;
-    padding: 10px 14px;
-    letter-spacing: 0.02em;
+  .empty { margin: 0; color: var(--muted); }
+  .extra {
+    margin: 2.5rem 0 0;
+    color: var(--muted);
+    font-size: 0.9rem;
   }
-  .place:disabled { opacity: 0.55; cursor: wait; }
+  .extra p { margin: 0.35rem 0; }
   .texty {
     background: transparent;
     border: 0;
-    color: var(--moss);
+    padding: 0;
+    color: var(--muted);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  #toc {
+    white-space: pre-wrap;
+    font-family: ui-monospace, "Cascadia Mono", monospace;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--faint);
+  }
+  .dock {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(244, 241, 234, 0.94);
+    border-top: 1px solid var(--line);
+  }
+  .dock-inner { max-width: 38rem; margin: 0 auto; padding: 0.85rem 1.5rem 1rem; }
+  textarea {
+    width: 100%;
+    border: 0;
+    resize: none;
+    background: transparent;
+    padding: 0.15rem 0;
+    min-height: 2.8rem;
+    line-height: 1.45;
+  }
+  .hint, .status { margin: 0.15rem 0 0; font-size: 0.92rem; }
+  .hint { color: var(--muted); }
+  .status { min-height: 1.2em; color: var(--ink); }
+  .status.error { color: #8a3a2a; }
+  .picker { display: flex; flex-wrap: wrap; gap: 0.45rem 1rem; margin: 0 0 0.7rem; }
+  .picker button {
+    background: transparent;
+    border: 0;
     padding: 0;
     text-decoration: underline;
     text-underline-offset: 3px;
   }
-  #status { min-height: 1.2em; margin: 0; font-size: 0.9rem; }
-  #status.error { color: var(--stamp); }
-  .lane-banner {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    border: 1px solid rgba(163, 59, 40, 0.35);
-    background: #fbf6f1;
-    padding: 10px 12px;
-    margin: 0 0 12px;
-  }
-  .lane-banner p { margin: 0; }
-  .thread { padding: 12px 0 6px; border-top: 1px solid var(--rule); }
-  .thread-head {
-    display: flex;
-    justify-content: space-between;
-    gap: 12px;
-    align-items: baseline;
-    width: 100%;
-    background: transparent;
-    border: 0;
-    padding: 0;
-    text-align: left;
-  }
-  .thread-head h3 { margin: 0; font-family: var(--serif); font-size: 1.25rem; font-weight: 560; }
-  .near { color: var(--muted); font-size: 0.82rem; }
-  .msg { padding: 8px 0 8px 0; }
-  .msg header { display: flex; gap: 8px; align-items: baseline; }
-  .who-name { font-weight: 600; }
-  .msg.is-loud .who-name { color: var(--stamp); }
-  .when { color: var(--muted); font-size: 0.8rem; }
-  .msg p { margin: 2px 0 0; white-space: pre-wrap; }
-  .raw { color: var(--muted); font-size: 0.75rem; }
-  .held { margin: 4px 0 10px; }
-  .held summary { cursor: pointer; color: var(--stamp); font-size: 0.88rem; }
-  .held li { margin: 4px 0; color: var(--muted); }
-  details#toc { margin-top: 18px; }
-  details#toc summary { cursor: pointer; font-size: 0.88rem; }
-  #toc-body {
-    white-space: pre-wrap;
-    font-family: var(--mono);
-    font-size: 0.72rem;
-    line-height: 1.4;
-    max-height: 280px;
-    overflow: auto;
-    background: rgba(255, 255, 255, 0.45);
-    padding: 8px;
-  }
-  .tabs {
-    display: none;
-    grid-template-columns: 1fr 1fr 1fr;
-    background: var(--forest);
-    position: sticky;
-    bottom: 0;
-    z-index: 2;
-  }
-  .tabs button {
-    background: transparent;
-    color: #d9d0c0;
-    border: 0;
-    border-top: 2px solid transparent;
-    padding: 12px 8px;
-  }
-  .tabs button[aria-selected="true"] { color: white; border-top-color: var(--stamp); }
-  .room-banner { margin: 8px 0 12px; color: var(--muted); }
-  .room-banner strong { color: var(--ink); font-weight: 600; }
-  @media (max-width: 960px) {
-    body { padding: 0; }
-    .journal { height: auto; min-height: 100vh; max-width: none; box-shadow: none; }
-    .topbar { flex-direction: column; align-items: stretch; gap: 10px; }
-    .who, .blurb, .chips, .who-row { align-items: flex-start; justify-content: flex-start; text-align: left; }
-    .pages { display: block; }
-    .spine, .sheet, .room { display: none; overflow: visible; }
-    body[data-tab="map"] .spine,
-    body[data-tab="feed"] .sheet,
-    body[data-tab="room"] .room { display: block; }
-    .tabs { display: grid; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .stamp { transform: none; }
+  #reason { display: none; margin: 0.2rem 0 0; color: var(--faint); font-size: 0.82rem; }
+  body.details #reason { display: block; }
+  @media (max-width: 640px) {
+    body { font-size: 17px; }
+    .wrap { padding-top: 2.5rem; }
+    .row { gap: 0.75rem; }
+    .preview { white-space: normal; }
   }
 </style>
 </head>
-<body data-tab="feed">
-  <div class="journal">
-    <header class="topbar">
-      <div class="brand">
-        <svg class="mark" viewBox="0 0 32 32" aria-hidden="true">
-          <rect x="2" y="6" width="28" height="3"></rect>
-          <rect x="2" y="14" width="18" height="3"></rect>
-          <rect x="2" y="22" width="10" height="3"></rect>
-        </svg>
-        <div>
-          <div class="word">Lanes</div>
-          <p class="kicker">Predictive multi-chat. Threads are phext coordinates.</p>
-        </div>
-      </div>
-      <div class="who">
-        <div class="who-row">
-          <label class="quiet" for="user">Reading as</label>
-          <select id="user" aria-label="Reading as"></select>
-          <button type="button" class="ghost" id="reset">Reset demo</button>
-        </div>
-        <p class="blurb" id="blurb">Opening chat.phext…</p>
-        <div class="chips" id="interests"></div>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">Lanes</div>
+      <div class="tools">
+        <select id="user" aria-label="You"></select>
+        <button type="button" class="quiet" id="details" aria-pressed="false">details</button>
       </div>
     </header>
-    <div class="pages">
-      <aside class="spine">
-        <h2>Coordinate map</h2>
-        <p class="deck">Shelves in library order. A longer bar sits closer to this reader.</p>
-        <div id="map"><p class="map-meta">Opening the map…</p></div>
-        <details id="toc">
-          <summary>Phext table of contents</summary>
-          <pre id="toc-body">Open to load phext::textmap.</pre>
-        </details>
-      </aside>
-      <main class="sheet">
-        <h2>Your feed</h2>
-        <p class="deck" id="feed-deck">Threads near your interests, then recency. One author can take two lines.</p>
-        <form id="composer">
-          <label for="text">Message</label>
-          <textarea id="text" maxlength="4000" placeholder="The ferns on the north wall need more shade"></textarea>
-          <div class="suggest">
-            <label for="coord">Coordinate</label>
-            <input id="coord" spellcheck="false" autocapitalize="off" placeholder="1.2.1/1.1.1/1.1.2">
-            <p id="reason">Start typing. The coordinate is a guess from shared words, not a language model.</p>
-          </div>
-          <div class="row">
-            <button class="place" type="submit">Place message</button>
-            <button class="texty" type="button" id="try-fern">Try the fern sentence</button>
-            <span class="map-meta">Ctrl+Enter</span>
-          </div>
-          <p id="status" role="status"></p>
-        </form>
-        <div id="lanes"></div>
-        <div id="feed"><p class="deck">Opening chat.phext…</p></div>
-      </main>
-      <section class="room" aria-label="Room">
-        <div id="room-body"><p class="deck">Opening the Hall…</p></div>
-      </section>
-    </div>
-    <nav class="tabs" aria-label="Sections">
-      <button type="button" data-tab="feed" aria-selected="true">Feed</button>
-      <button type="button" data-tab="map" aria-selected="false">Map</button>
-      <button type="button" data-tab="room" aria-selected="false">Room</button>
-    </nav>
+    <main id="feed"></main>
+    <p id="held" class="held" hidden></p>
+    <div id="extra" class="extra" hidden></div>
   </div>
+  <form id="composer" class="dock">
+    <div class="dock-inner">
+      <div id="picker" class="picker" hidden></div>
+      <label class="sr" for="text">Message</label>
+      <textarea id="text" rows="2" maxlength="4000" placeholder="Write a message"></textarea>
+      <p class="hint">Posting to: <span id="where">…</span> — <button type="button" id="change">change</button></p>
+      <p id="reason"></p>
+      <p id="status" class="status" role="status"></p>
+    </div>
+  </form>
 <script>
-const FERN_SAMPLE = "The ferns on the north wall need more shade";
-const HALL = "1.1.1/1.1.1";
 const state = {
-  user: "mira",
+  user: localStorage.getItem("lanes.user") || "mira",
   data: null,
-  roomThread: HALL,
+  open: null,
   room: null,
-  coordDirty: false,
-  lastSuggest: null,
+  override: null,
+  suggestion: null,
+  picker: false,
+  loadGen: 0,
+  suggestGen: 0,
   timer: 0,
-  generation: 0,
 };
 
-const $ = (sel) => document.querySelector(sel);
-
-function ago(iso) {
-  if (!iso) return "";
-  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (Number.isNaN(secs)) return "";
-  if (secs < 45) return "just now";
-  if (secs < 3600) return Math.floor(secs / 60) + "m ago";
-  if (secs < 86400) return Math.floor(secs / 3600) + "h ago";
-  return Math.floor(secs / 86400) + "d ago";
-}
-
-function pct(share) {
-  return Math.round((share || 0) * 100);
-}
+const $ = (id) => document.getElementById(id);
 
 function el(tag, attrs, children) {
   const node = document.createElement(tag);
@@ -366,371 +205,312 @@ function el(tag, attrs, children) {
       else if (value !== null && value !== undefined) node.setAttribute(key, value);
     }
   }
-  for (const child of children || []) {
-    if (child) node.append(child);
-  }
+  for (const child of children || []) if (child) node.append(child);
   return node;
 }
 
 function setStatus(text, isError) {
-  const node = $("#status");
+  const node = $("status");
   node.textContent = text || "";
   node.classList.toggle("error", Boolean(isError));
 }
 
-function setTab(tab) {
-  document.body.dataset.tab = tab;
-  for (const button of document.querySelectorAll(".tabs button")) {
-    button.setAttribute("aria-selected", button.dataset.tab === tab ? "true" : "false");
+function whereTitle() {
+  if (state.override) return state.override.title;
+  if (!state.suggestion) return "…";
+  return state.suggestion.title || "a new thread";
+}
+
+function paintWhere() {
+  $("where").textContent = whereTitle();
+  const reason = $("reason");
+  if (state.override) {
+    reason.textContent = state.override.thread;
+  } else if (state.suggestion) {
+    reason.textContent = state.suggestion.reason || "";
+  } else {
+    reason.textContent = "";
   }
 }
 
 async function loadState() {
-  const gen = ++state.generation;
+  const gen = ++state.loadGen;
   const res = await fetch("/api/state?user=" + encodeURIComponent(state.user));
   const body = await res.json();
-  if (!res.ok) throw new Error(body.error || "Could not open the phext");
-  if (gen !== state.generation) return;
+  if (!res.ok) throw new Error(body.error || "Could not open the chat");
+  if (gen !== state.loadGen) return;
   state.data = body;
+  if (!body.users.some((user) => user.id === state.user)) state.user = body.viewer.id;
   render();
-  await loadRoom(state.roomThread);
-}
-
-async function loadRoom(thread) {
-  state.roomThread = thread;
-  const res = await fetch("/api/room?thread=" + encodeURIComponent(thread));
-  const body = await res.json();
-  if (!res.ok) {
-    state.room = null;
-    $("#room-body").replaceChildren(el("p", { class: "deck", text: body.error || "No room at that coordinate." }));
-    markMap();
-    return;
-  }
-  state.room = body;
-  renderRoom();
-  markMap();
-  const room = $(".room");
-  if (room) room.scrollTop = 0;
+  if (state.open) await loadRoom(state.open);
 }
 
 function render() {
   const data = state.data;
   if (!data) return;
-  const select = $("#user");
+  const select = $("user");
   const ids = data.users.map((user) => user.id).join(",");
   if (select.dataset.ids !== ids) {
     select.replaceChildren();
-    for (const user of data.users) {
-      select.append(el("option", { value: user.id, text: user.name }));
-    }
+    for (const user of data.users) select.append(el("option", { value: user.id, text: user.name }));
     select.dataset.ids = ids;
   }
   select.value = data.viewer.id;
-  $("#blurb").textContent = data.viewer.blurb;
-  $("#feed-deck").textContent = "Threads near your interests, then recency. An author with " + data.loud_at + " or more messages is held to " + data.cap + " lines. The rest of their posts wait in a lane.";
-
-  const chips = $("#interests");
-  chips.replaceChildren();
-  for (const interest of data.viewer.interests) {
-    chips.append(el("button", {
-      type: "button",
-      class: "chip",
-      onclick: () => openRoom(interest.thread),
-    }, [
-      document.createTextNode(interest.thread),
-      el("small", { text: interest.label }),
-    ]));
-  }
-
-  renderMap(data.map);
-  renderLanes(data.lanes, data.cap);
   renderFeed(data.feed);
-}
-
-function renderMap(rows) {
-  const map = $("#map");
-  map.replaceChildren();
-  let topic = "";
-  for (const row of rows) {
-    if (row.topic_coord !== topic) {
-      topic = row.topic_coord;
-      map.append(el("div", { class: "topic-name" }, [
-        document.createTextNode(row.topic),
-        el("span", { class: "coord", text: row.topic_coord }),
-      ]));
-    }
-    const button = el("button", {
-      type: "button",
-      class: "map-row",
-      "data-thread": row.thread,
-      onclick: () => openRoom(row.thread),
-    });
-    const title = el("div", { class: "map-title" }, [
-      el("strong", { text: row.title }),
-      el("span", { class: "coord", text: row.thread }),
-    ]);
-    button.append(title);
-    const d = Math.min(row.distance, 40) / 40;
-    const bar = el("span", { class: "bar" });
-    bar.style.setProperty("--d", d.toFixed(3));
-    button.append(bar);
-    const meta = el("div", { class: "map-meta" });
-    meta.append(row.messages + " messages · " + row.nearness);
-    if (row.flooded && row.majority_author) {
-      meta.append(" · ");
-      meta.append(el("span", { class: "stamp", text: "Flooded" }));
-    }
-    button.append(meta);
-    map.append(button);
-  }
-  if (!rows.length) map.append(el("p", { class: "map-meta", text: "No threads yet." }));
-  markMap();
-}
-
-function markMap() {
-  for (const row of document.querySelectorAll(".map-row")) {
-    row.classList.toggle("is-open", row.dataset.thread === state.roomThread);
-  }
-}
-
-function renderLanes(lanes) {
-  const host = $("#lanes");
-  host.replaceChildren();
-  for (const lane of lanes) {
-    const where = lane.threads.length ? " Across " + lane.threads.join(", ") + "." : "";
-    host.append(el("aside", { class: "lane-banner" }, [
-      el("span", { class: "stamp", text: "Lane" }),
-      el("p", { text: lane.author + " has " + lane.held + " messages in a side lane. This feed shows " + lane.shown + "." + where }),
-    ]));
-  }
+  const held = data.feed.reduce((sum, thread) => sum + thread.held.length, 0);
+  const note = $("held");
+  note.hidden = held === 0;
+  note.textContent = held + " more held";
+  renderExtra();
+  paintWhere();
 }
 
 function renderFeed(threads) {
-  const feed = $("#feed");
+  const feed = $("feed");
   feed.replaceChildren();
   if (!threads.length) {
-    feed.append(el("p", { class: "deck", text: "Nothing in this neighborhood yet." }));
+    feed.append(el("p", { class: "empty", text: "Nothing here yet." }));
     return;
   }
   for (const thread of threads) {
-    const block = el("article", { class: "thread" });
-    const head = el("button", {
+    const item = el("article", { class: "item" });
+    const message = thread.messages[0];
+    const preview = message ? message.author + ": " + (message.preview || message.text) : "";
+    const row = el("button", {
       type: "button",
-      class: "thread-head",
-      onclick: () => openRoom(thread.thread),
+      class: "row",
+      "aria-expanded": state.open === thread.thread ? "true" : "false",
+      onclick: () => toggleThread(thread.thread),
     }, [
-      el("h3", { text: thread.title }),
-      el("span", { class: "near", text: thread.nearness + " · " + thread.thread }),
+      el("span", { class: "title", text: thread.title }),
+      preview ? el("span", { class: "preview", text: preview }) : null,
     ]);
-    block.append(head);
-    const topic = el("div", { class: "map-meta", text: thread.topic });
-    block.append(topic);
-    for (const message of thread.messages) block.append(messageNode(message, false));
-    if (thread.held.length) block.append(heldNode(thread.held));
-    feed.append(block);
+    item.append(row);
+    item.append(el("p", {
+      class: "meta",
+      text: thread.thread + " · " + thread.nearness + " · distance " + thread.distance + " · score " + thread.score.toFixed(2),
+    }));
+    const reading = el("div", { class: "reading" });
+    if (state.open === thread.thread) fillReading(reading);
+    else reading.hidden = true;
+    item.append(reading);
+    feed.append(item);
   }
 }
 
-function messageNode(message, loud) {
-  const node = el("article", { class: loud ? "msg is-loud" : "msg" });
-  const head = el("header");
-  head.append(el("span", { class: "who-name", text: message.author }));
-  head.append(el("span", { class: "when", text: ago(message.ts) }));
-  head.append(el("a", { class: "raw coord", href: "/api/scroll?coord=" + encodeURIComponent(message.coord), target: "_blank", rel: "noreferrer", text: message.coord }));
-  node.append(head);
-  node.append(el("p", { text: message.text }));
-  return node;
-}
-
-function heldNode(messages) {
-  const groups = new Map();
-  for (const message of messages) {
-    if (!groups.has(message.author)) groups.set(message.author, []);
-    groups.get(message.author).push(message);
-  }
-  const details = el("details", { class: "held" });
-  const bits = [];
-  for (const [author, list] of groups) bits.push(author + " · " + list.length + " held");
-  details.append(el("summary", { text: bits.join("  ·  ") }));
-  const list = el("ul");
-  for (const message of messages) {
-    const item = el("li");
-    item.append(el("span", { class: "coord", text: message.coord + " " }));
-    item.append(message.preview || message.text);
-    list.append(item);
-  }
-  details.append(list);
-  return details;
-}
-
-function renderRoom() {
-  const room = state.room;
-  const host = $("#room-body");
-  if (!room) return;
+function fillReading(host) {
+  host.hidden = false;
   host.replaceChildren();
-  host.append(el("p", { class: "map-meta", text: room.topic + " · " + room.topic_coord }));
-  host.append(el("h2", { text: room.title }));
-  host.append(el("p", { class: "coord", text: room.thread }));
-  const banner = el("p", { class: "room-banner" });
-  banner.append("Chronological room. Nothing is hidden here. ");
-  if (room.majority_author) {
-    const strong = el("strong", { text: room.majority_author + " wrote " + room.majority_count + " of " + room.message_count + "." });
-    banner.append(strong);
+  const room = state.room;
+  if (!room) {
+    host.append(el("p", { class: "empty", text: "Opening…" }));
+    return;
   }
-  if (room.flooded) {
-    banner.append(" ");
-    banner.append(el("span", { class: "stamp", text: "Flooded" }));
-  }
-  host.append(banner);
-  const loud = room.flooded ? room.majority_author : null;
+  if (room.thread !== state.open) return;
   for (const message of room.messages) {
-    host.append(messageNode(message, message.author === loud));
+    const by = el("p", { class: "by" });
+    by.append(message.author + " ");
+    by.append(el("span", { class: "coord", text: message.coord }));
+    host.append(el("article", { class: "msg" }, [by, el("p", { text: message.text })]));
   }
-  if (!room.messages.length) host.append(el("p", { class: "deck", text: "This coordinate is still a blank scroll." }));
+  if (!room.messages.length) host.append(el("p", { class: "empty", text: "Nothing in this thread yet." }));
 }
 
-function openRoom(thread) {
-  loadRoom(thread).catch((err) => setStatus(err.message, true));
-  if (window.matchMedia("(max-width: 960px)").matches) setTab("room");
+async function toggleThread(thread) {
+  if (state.open === thread) {
+    state.open = null;
+    state.room = null;
+    renderFeed(state.data.feed);
+    return;
+  }
+  state.open = thread;
+  state.room = null;
+  renderFeed(state.data.feed);
+  await loadRoom(thread);
+}
+
+async function loadRoom(thread) {
+  const res = await fetch("/api/room?thread=" + encodeURIComponent(thread));
+  const body = await res.json();
+  if (state.open !== thread) return;
+  if (!res.ok) {
+    setStatus(body.error || "Could not open that thread", true);
+    return;
+  }
+  state.room = body;
+  renderFeed(state.data.feed);
+}
+
+function renderExtra() {
+  const host = $("extra");
+  const on = document.body.classList.contains("details");
+  host.hidden = !on;
+  host.replaceChildren();
+  if (!on || !state.data) return;
+  const data = state.data;
+  host.append(el("p", { text: data.file }));
+  host.append(el("p", { text: "An author with " + data.loud_at + " or more messages is kept to " + data.cap + " lines." }));
+  for (const lane of data.lanes) {
+    host.append(el("p", { text: lane.author + " · " + lane.held + " held, " + lane.shown + " shown" }));
+  }
+  const reset = el("button", { type: "button", class: "texty", text: "Reset demo" });
+  reset.addEventListener("click", () => resetDemo(reset));
+  host.append(reset);
+  host.append(el("pre", { id: "toc", text: "Loading…" }));
+  fetch("/api/toc").then((res) => res.json()).then((body) => {
+    const toc = $("toc");
+    if (!toc) return;
+    if (body.error) {
+      toc.textContent = body.error;
+      return;
+    }
+    const lines = body.threads.map((thread) => thread.thread + "  " + thread.title);
+    toc.textContent = lines.join("\n") + "\n\n" + body.textmap;
+  }).catch(() => {
+    const toc = $("toc");
+    if (toc) toc.textContent = "Could not read the file.";
+  });
+}
+
+function renderPicker() {
+  const host = $("picker");
+  host.hidden = !state.picker;
+  host.replaceChildren();
+  if (!state.picker || !state.data) return;
+  host.append(el("button", {
+    type: "button",
+    text: "Automatic",
+    onclick: () => choose(null),
+  }));
+  const threads = state.data.map.slice().sort((a, b) => a.title.localeCompare(b.title));
+  for (const thread of threads) {
+    host.append(el("button", {
+      type: "button",
+      text: thread.title,
+      onclick: () => choose(thread),
+    }));
+  }
+}
+
+function choose(thread) {
+  state.override = thread ? { thread: thread.thread, title: thread.title } : null;
+  state.picker = false;
+  renderPicker();
+  paintWhere();
 }
 
 async function runSuggest() {
-  const text = $("#text").value;
-  if (!text.trim()) {
-    state.lastSuggest = null;
-    if (!state.coordDirty) $("#coord").value = "";
-    $("#reason").textContent = "Start typing. The coordinate is a guess from shared words, not a language model.";
-    return;
-  }
+  const gen = ++state.suggestGen;
   const url = new URL("/api/suggest", location.origin);
   url.searchParams.set("user", state.user);
-  url.searchParams.set("text", text);
+  url.searchParams.set("text", $("text").value);
   const res = await fetch(url);
   const body = await res.json();
-  if (!res.ok) throw new Error(body.error || "Could not suggest a coordinate");
-  state.lastSuggest = body;
-  if (!state.coordDirty) $("#coord").value = body.coord;
-  $("#reason").textContent = body.reason;
+  if (gen !== state.suggestGen) return;
+  if (!res.ok) throw new Error(body.error || "Could not choose a thread");
+  state.suggestion = body;
+  paintWhere();
 }
 
 function scheduleSuggest() {
   clearTimeout(state.timer);
   state.timer = setTimeout(() => {
-    runSuggest().catch((err) => { $("#reason").textContent = err.message; });
-  }, 180);
+    runSuggest().catch((err) => setStatus(err.message, true));
+  }, 160);
 }
 
 async function place(event) {
   event.preventDefault();
-  const text = $("#text").value.trim();
+  const text = $("text").value.trim();
   if (!text) {
     setStatus("Write a message first.", true);
     return;
   }
-  const button = event.target.querySelector(".place");
-  button.disabled = true;
-  setStatus("Placing…", false);
-  try {
-    const res = await fetch("/api/post", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user: state.user, text, coord: $("#coord").value.trim() }),
-    });
-    const body = await res.json();
-    if (!res.ok) throw new Error(body.error || "Could not place the message");
-    $("#text").value = "";
-    state.coordDirty = false;
-    state.lastSuggest = null;
-    $("#coord").value = "";
-    $("#reason").textContent = "Start typing. The coordinate is a guess from shared words, not a language model.";
-    setStatus("Placed at " + body.coord + " · " + body.topic + " / " + body.title, false);
-    state.roomThread = body.thread;
-    await loadState();
-  } catch (err) {
-    setStatus(err.message, true);
-  } finally {
-    button.disabled = false;
-  }
+  setStatus("", false);
+  const coord = state.override ? state.override.thread : (state.suggestion && state.suggestion.coord) || "";
+  const res = await fetch("/api/post", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user: state.user, text, coord }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "Could not post");
+  $("text").value = "";
+  state.override = null;
+  state.suggestion = null;
+  setStatus("Posted to " + body.title + ".", false);
+  await loadState();
+  await runSuggest();
 }
 
-$("#user").addEventListener("change", () => {
-  state.user = $("#user").value;
-  state.coordDirty = false;
-  setStatus("", false);
-  loadState()
-    .then(() => runSuggest())
-    .catch((err) => setStatus(err.message, true));
-});
-
-$("#text").addEventListener("input", scheduleSuggest);
-$("#text").addEventListener("keydown", (event) => {
-  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-    event.preventDefault();
-    $("#composer").requestSubmit();
-  }
-});
-$("#coord").addEventListener("input", () => {
-  const suggested = state.lastSuggest ? state.lastSuggest.coord : "";
-  state.coordDirty = $("#coord").value.trim() !== "" && $("#coord").value.trim() !== suggested;
-});
-$("#composer").addEventListener("submit", (event) => {
-  place(event).catch((err) => setStatus(err.message, true));
-});
-$("#try-fern").addEventListener("click", () => {
-  $("#text").value = FERN_SAMPLE;
-  $("#text").focus();
-  state.coordDirty = false;
-  scheduleSuggest();
-});
-$("#reset").addEventListener("click", async () => {
-  const button = $("#reset");
+async function resetDemo(button) {
   if (button.dataset.armed !== "1") {
     button.dataset.armed = "1";
-    button.classList.add("armed");
-    button.textContent = "Confirm reset";
+    button.textContent = "Reset demo?";
     setTimeout(() => {
       button.dataset.armed = "0";
-      button.classList.remove("armed");
       button.textContent = "Reset demo";
     }, 2500);
     return;
   }
-  button.dataset.armed = "0";
-  button.classList.remove("armed");
-  button.textContent = "Reset demo";
   const res = await fetch("/api/reset", { method: "POST" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     setStatus(body.error || "Reset failed", true);
     return;
   }
-  state.roomThread = HALL;
-  state.coordDirty = false;
-  $("#text").value = "";
-  $("#coord").value = "";
-  setStatus("Demo seed restored.", false);
+  state.open = null;
+  state.room = null;
+  state.override = null;
+  $("text").value = "";
+  setStatus("Demo restored.", false);
   await loadState();
-});
-$("#toc").addEventListener("toggle", async () => {
-  if (!$("#toc").open) return;
-  $("#toc-body").textContent = "Loading…";
-  const res = await fetch("/api/toc");
-  const body = await res.json();
-  if (!res.ok) {
-    $("#toc-body").textContent = body.error || "Could not read the toc";
-    return;
-  }
-  const lines = body.threads.map((thread) => thread.thread + "  " + thread.topic + " / " + thread.title + "  (" + thread.messages + ")");
-  $("#toc-body").textContent = lines.join("\n") + "\n\n--- phext::textmap ---\n" + body.textmap + "\n--- phext::index ---\n" + body.index;
-});
-for (const button of document.querySelectorAll(".tabs button")) {
-  button.addEventListener("click", () => setTab(button.dataset.tab));
+  await runSuggest();
 }
 
-loadState().catch((err) => {
-  $("#feed").replaceChildren(el("p", { class: "deck", text: err.message }));
-  $("#blurb").textContent = "The phext did not open.";
+$("user").addEventListener("change", () => {
+  state.user = $("user").value;
+  localStorage.setItem("lanes.user", state.user);
+  state.open = null;
+  state.room = null;
+  state.override = null;
+  setStatus("", false);
+  loadState().then(() => runSuggest()).catch((err) => setStatus(err.message, true));
 });
+
+$("details").addEventListener("click", () => {
+  const on = !document.body.classList.contains("details");
+  document.body.classList.toggle("details", on);
+  $("details").setAttribute("aria-pressed", on ? "true" : "false");
+  renderExtra();
+});
+
+$("change").addEventListener("click", () => {
+  state.picker = !state.picker;
+  renderPicker();
+});
+
+$("text").addEventListener("input", () => {
+  setStatus("", false);
+  if (!state.override) scheduleSuggest();
+});
+
+$("text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+
+$("composer").addEventListener("submit", (event) => {
+  place(event).catch((err) => setStatus(err.message, true));
+});
+
+loadState()
+  .then(() => runSuggest())
+  .catch((err) => {
+    $("feed").replaceChildren(el("p", { class: "empty", text: err.message }));
+  });
 </script>
 </body>
 </html>

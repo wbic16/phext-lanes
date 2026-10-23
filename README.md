@@ -1,86 +1,60 @@
 # Lanes
 
-Predictive multi-chat, stored as one [phext](https://phext.io) file.
+```bash
+git clone <repo-url> lanes && cd lanes && cargo run
+```
 
-Group chat has two failure modes. A few enthusiastic people drown everyone else out, and a small room goes silent because it feels rude to talk past them. Lanes keeps every message, but it does not put every message on every screen. A message lands at a coordinate. Each reader has a few coordinates they care about. Their feed is the neighborhood of those coordinates, and anyone who posts constantly is given a lane instead of the page.
+Open http://127.0.0.1:7841. You are Mira. Type a message and press Enter. The first run writes `data/chat.phext`.
+
+---
+
+Predictive multi-chat, stored as one [phext](https://phext.io) file. The page is one feed: a line for each relevant thread, then a compose box. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
 
 The cast is fictional: Mira Quill, Jules Fen, Ada North, Ren Sato, and Casey Horn. Casey is the hyper-poster.
 
-![Mira Quill's feed beside the Hall, where Casey Horn wrote 12 of 15 messages](docs/demo.png)
+## On the page
 
-## Demo
+You land on Mira's feed. Fern wall and Seed swap lead, because those are her interests. Each thread is one line. Click it to read the messages underneath. The box at the bottom says where the next message will go (`Posting to: Fern wall — change`). Enter posts. Shift+Enter adds a line. **change** picks another thread by name. **details** shows coordinates, scores, and who was held back.
 
-`cargo run` serves the reading room and, the first time, writes `data/chat.phext`.
+The name at the top switches reader. Casey's feed opens on General, and he still only gets two lines, so the quieter voices stay visible. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
 
-1. Open the page. You are Mira Quill. Her interests are the two garden threads, so **Fern wall** and **Seed swap** lead the feed. The Hall is only "same wing."
-2. The red lane says Casey Horn has 21 messages held back. The feed shows 2 of them.
-3. The room on the right is the Hall, chronological and uncut. Casey wrote 12 of 15. The three notes above that wall are Ren, Jules, and Mira leaving for quieter coordinates. In Mira's feed those three are the Hall, and Casey's twelve are the lane.
-4. Press **Try the fern sentence**. The coordinate field fills with the next scroll of Fern wall, because the words overlap that thread (`fern`, `shade`, `north`, `wall`). Place it. The scroll is appended in the phext.
-5. Switch **Reading as** to Casey Horn. The Hall rises to the top, because that coordinate is his interest. He still only gets two lines, so Mira, Jules, and Ren stay visible under him.
-6. Click any row in the coordinate map to open that room. **Reset demo** (click twice) or `cargo run -- seed` restores the cast.
+## CLI
 
-![The fern sentence predicted as the next scroll of Fern wall](docs/suggest.png)
-
-On a narrow screen the same three surfaces are tabs: Feed, Map, Room.
-
-## Quickstart
-
-Clone the repo, then start the reading room from the project root. The first run writes `data/chat.phext`. The server listens on port **7841**.
+Three commands. With no command, Lanes serves the page.
 
 ```bash
-git clone <repo-url> lanes
-cd lanes
-cargo run
+cargo run -- feed
+cargo run -- post --text "The moss tray can stay another week."
+cargo run -- read "Fern wall"
 ```
 
-Open [http://127.0.0.1:7841](http://127.0.0.1:7841).
+The reader defaults to `mira`. Set `--user`, or `LANES_USER`, or a `lanes.json` next to where you run:
 
-A few CLI examples, using the same file:
-
-```bash
-cargo run -- feed --user mira
-cargo run -- room --coord 1.1.1/1.1.1
-cargo run -- suggest --user mira --text "The ferns on the north wall need more shade"
-cargo run -- post --author mira --text "The moss tray can stay another week."
-cargo run -- toc
-cargo run -- select --coord 1.2.1/1.1.1/1.1.2
+```json
+{ "user": "mira", "file": "data/chat.phext" }
 ```
 
-Override the port or the phext path, or run the tests:
+The phext defaults to `data/chat.phext`. `--file` and `LANES_FILE` override that. `--details` prints coordinates and scores. `--preview` on `post` only says where the message would land. `--scroll` and `--index` on `read` are the raw scroll and the table of contents.
 
 ```bash
+cargo run -- feed --user casey
+cargo run -- --details feed
+cargo run -- post --text "The ferns on the north wall need more shade" --preview
+cargo run -- read --scroll 1.2.1/1.1.1/1.1.2
+cargo run -- read --index
+cargo run -- --seed
 cargo run -- --port 7841 --file data/chat.phext
 cargo test
 ```
 
-Count the dimension breaks in the file:
-
-```bash
-python3 -c "d=open('data/chat.phext','rb').read(); print({hex(b): d.count(bytes([b])) for b in (0x01,0x17,0x1c,0x1f)})"
-```
-
-You should see scroll breaks (`0x17`) between messages, a shelf break (`0x1f`) between the Hall and the gardens, a volume break (`0x1c`) between Fern wall and Seed swap, and library breaks (`0x01`) between topics.
-
-## CLI
-
-```bash
-cargo run -- feed --user mira
-cargo run -- room --coord 1.1.1/1.1.1
-cargo run -- suggest --user mira --text "The ferns on the north wall need more shade"
-cargo run -- post --author mira --text "The moss tray can stay another week."
-cargo run -- toc
-cargo run -- select --coord 1.2.1/1.1.1/1.1.2
-cargo run -- seed
-```
-
-`--author` accepts a reader id (`mira`) or a display name. Omit `--coord` on `post` and the same overlap guess the page uses picks the scroll. `toc` prints the thread index, then `phext::textmap`, then byte offsets from `phext::index`. `select` is `phext::fetch`.
+`--user` accepts a reader id (`mira`) or a display name. Omit `--coord` on `post` and the same word-overlap guess the page uses picks the scroll.
 
 HTTP, if you want it without the page:
 
 | | |
 |---|---|
 | `GET /api/state?user=mira` | ranked feed, lanes, coordinate map |
-| `GET /api/room?thread=1.1.1/1.1.1` | chronological room |
+| `GET /api/room?thread=1.1.1/1.1.1` | chronological thread |
 | `GET /api/suggest?user=mira&text=ferns` | predicted scroll |
 | `POST /api/post` | `{"user":"mira","text":"...","coord":"1.2.1/1.1.1"}` |
 | `GET /api/scroll?coord=1.2.1/1.1.1/1.1.2` | raw scroll |
@@ -141,8 +115,16 @@ The delimiters, as libphext defines them:
 | Volume | `0x1C` | Fern wall and Seed swap |
 | Collection | `0x1D` | Collections |
 | Series | `0x1E` | Series |
-| Shelf | `0x1F` | The Hall (`1.1.1`) and Gardens (`1.2.1`) |
+| Shelf | `0x1F` | General (`1.1.1`) and Gardens (`1.2.1`) |
 | Library | `0x01` | Gardens and Workshops |
+
+Count them in a seeded file:
+
+```bash
+python3 -c "d=open('data/chat.phext','rb').read(); print({hex(b): d.count(bytes([b])) for b in (0x01,0x17,0x1c,0x1f)})"
+```
+
+You should see scroll breaks (`0x17`) between messages, a shelf break (`0x1f`) between General and the gardens, a volume break (`0x1c`) between Fern wall and Seed swap, and library breaks (`0x01`) between topics.
 
 ### Feed
 
@@ -154,21 +136,23 @@ score = 0.72 / (1 + distance) + 0.28 / (1 + age_hours / 18)
 
 Age is the age of the newest message in the thread. Distance is the minimum over the reader's interests. No interests means every thread is distance 0 and the feed is recency.
 
-Nearness labels on the page: 0 subscribed, 1–3 next door, 4–12 same wing, otherwise across the library.
+Nearness, shown only under details: 0 subscribed, 1–3 next door, 4–12 same wing, otherwise across the library. The default feed is one line per thread, the newest message the cap allowed, and does not print coordinates or scores.
 
 ### The lane
 
-An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in one reader's feed, wherever those lines would have ranked. The rest are a lane: still in the file, still in the chronological room, not on the page. Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
+An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in one reader's feed, wherever those lines would have ranked. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
 
-The Hall is marked flooded when one author wrote at least 70% of a room of 10 or more messages. Casey is 12 of 15 there. Fern wall is half Casey and is not marked; the cap still holds him to two lines.
+General is marked flooded, under details, when one author wrote at least 70% of a room of 10 or more messages. Casey is 12 of 15 there. Fern wall is half Casey and is not marked; the cap still holds him to two lines.
 
 ### Prediction
 
 There is no model. The draft is split into words, a trailing "s" is stripped (`ferns` → `fern`), and stopwords are dropped. Each existing thread is the same bag over its title, keywords, and recent messages. The thread with the most shared words wins. Ties break toward the reader's interests, then recency. If nothing overlaps, the next free book on the reader's home shelf is proposed (`1.2.1/1.1.2` for Mira, beside Fern wall). Placing into a coordinate that does not exist yet writes the thread card and the first message.
 
+The page shows that choice as `Posting to: <title> — change`. It does not show the shared words unless details is open.
+
 ## Tests
 
-`cargo test` covers coordinate parsing (including the semicolon form), the nine phext break codes, distance weights, the score ordering (a stale subscribed thread beats a brand-new far one), the loud-author cap, keyword prediction, a new-book suggestion, `insert` / `fetch` / `textmap` roundtrips, a scroll inserted between two existing coordinates, rejection of an injected `0x17`, and the seeded cast: Mira opens on Fern wall, Casey opens on the Hall but still sees the quiet voices, and the Hall is flooded while his lane holds the rest.
+`cargo test` covers coordinate parsing (including the semicolon form), the nine phext break codes, distance weights, the score ordering (a stale subscribed thread beats a brand-new far one), the loud-author cap, keyword prediction, a new-book suggestion, `insert` / `fetch` / `textmap` roundtrips, a scroll inserted between two existing coordinates, rejection of an injected `0x17`, and the seeded cast: Mira opens on Fern wall, Casey opens on General but still sees the quiet voices, and General is flooded while his held messages stay out of the one-line feed. It also checks that the calm feed is one line per thread plus an "N more held" note, that a thread opens by title, that reader and file defaults come from a flag, then the environment, then `lanes.json`, and that the commands are `feed`, `post`, and `read`.
 
 ## License
 

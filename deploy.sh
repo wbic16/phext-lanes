@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Deploy Lanes onto the phext.io host and proxy mc.phext.io at Apache.
+# Deploy Lanes and reverse-proxy mc.phext.io with the nginx already on this host.
 # Idempotent: run it again to rebuild exo and restart. Chat data lives in
 # DATA_DIR, outside the git checkout, and is seeded only when missing.
 #
 #   curl -fsSL https://raw.githubusercontent.com/wbic16/phext-lanes/exo/deploy.sh | bash
-#   bash deploy.sh [--no-tls] [--branch exo] [--port 7841] [--domain mc.phext.io]
+#   bash deploy.sh [--no-tls] [--user ubuntu] [--branch exo] [--port 7841]
 #
 # Flags override the same-named environment variables.
 # mc.phext.io's A record is 44.248.235.76. Certbot still waits until DNS
@@ -17,8 +17,9 @@ DOMAIN="${DOMAIN:-mc.phext.io}"
 EXPECTED_A="${EXPECTED_A:-44.248.235.76}"
 APP_DIR="${APP_DIR:-${HOME}/phext-lanes}"
 DATA_DIR="${DATA_DIR:-/var/lib/phext-lanes}"
+SERVICE_USER="${SERVICE_USER:-}"
 NO_TLS="${NO_TLS:-0}"
-REQUIRED_USER="ubuntu"
+
 REPO="https://github.com/wbic16/phext-lanes.git"
 SERVICE="phext-lanes.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE}"
@@ -26,17 +27,19 @@ UNIT_PATH="/etc/systemd/system/${SERVICE}"
 usage() {
   cat <<'EOF'
 Usage: deploy.sh [--branch NAME] [--port PORT] [--domain NAME]
-                 [--app-dir DIR] [--data-dir DIR] [--no-tls]
+                 [--app-dir DIR] [--data-dir DIR] [--user NAME] [--no-tls]
 
-  BRANCH    git branch to deploy (default exo)
-  PORT      localhost port (default 7841)
-  DOMAIN    public name (default mc.phext.io)
-  APP_DIR   checkout (default ~/phext-lanes)
-  DATA_DIR  phext directory kept across redeploys (default /var/lib/phext-lanes)
-  --no-tls  do not run certbot
+  BRANCH        git branch to deploy (default exo)
+  PORT          localhost port (default 7841)
+  DOMAIN        public name (default mc.phext.io)
+  APP_DIR       checkout (default ~/phext-lanes)
+  DATA_DIR      phext directory kept across redeploys (default /var/lib/phext-lanes)
+  SERVICE_USER  systemd user (default: the user running this script)
+  --no-tls      do not run certbot
 
-Run as $REQUIRED_USER. The script uses sudo for yum, systemd, and Apache.
-CERTBOT_EMAIL is optional; without it certbot registers without an email.
+Run as the account that should own the service (ubuntu or wbic16). The
+script uses sudo for apt, systemd, and nginx. It only writes
+sites-available/sites-enabled for DOMAIN. CERTBOT_EMAIL is optional.
 EOF
 }
 
@@ -78,19 +81,21 @@ port_is_foreign() {
   return 1
 }
 
-vhost_matches() {
+# 0 when this file already proxies DOMAIN at PORT, including after certbot edits.
+site_matches() {
   local file=$1
   local domain=$2
   local port=$3
-  [[ -f "$file" ]] || return 1
+  [[ -e "$file" ]] || return 1
   local -a reader
   if [[ -r "$file" ]]; then
     reader=(grep -qF)
   else
     reader=(sudo grep -qF)
   fi
-  "${reader[@]}" "ServerName ${domain}" "$file" \
-    && "${reader[@]}" "ProxyPass / http://127.0.0.1:${port}/" "$file"
+  "${reader[@]}" "server_name ${domain};" "$file" \
+    && "${reader[@]}" "proxy_pass http://127.0.0.1:${port};" "$file" \
+    && "${reader[@]}" 'proxy_set_header Upgrade' "$file"
 }
 
 ss_listen_dump() {
@@ -101,7 +106,7 @@ ss_listen_dump() {
   elif [[ -x /usr/sbin/ss ]]; then
     ss_bin=/usr/sbin/ss
   else
-    die "ss is not installed (iproute). Cannot check whether port ${port} is free."
+    die "ss is not installed (iproute2). Cannot check whether port ${port} is free."
   fi
   local dump
   dump=$(sudo "$ss_bin" -H -ltnp "sport = :${port}" 2>/dev/null || true)
@@ -123,6 +128,9 @@ public_ipv4() {
   if [[ -z "$ip" ]]; then
     ip=$(curl -fsS --max-time 2 \
       "http://169.254.169.254/latest/meta-data/public-ipv4" 2>/dev/null || true)
+  fi
+  if [[ -z "$ip" ]]; then
+    ip=$(curl -4 -fsS --max-time 5 "https://ifconfig.me" 2>/dev/null | tr -d '[:space:]' || true)
   fi
   if [[ -z "$ip" ]]; then
     ip=$(curl -fsS --max-time 5 "https://checkip.amazonaws.com" 2>/dev/null | tr -d '[:space:]' || true)
@@ -164,27 +172,19 @@ http_code() {
 
 certbot_print() {
   if [[ -n "${CERTBOT_EMAIL:-}" ]]; then
-    printf 'sudo certbot --apache -d %s --non-interactive --agree-tos --redirect --email %s\n' \
+    printf 'sudo certbot --nginx -d %s --non-interactive --agree-tos --redirect --email %s\n' \
       "$DOMAIN" "$CERTBOT_EMAIL"
   else
-    printf 'sudo certbot --apache -d %s --non-interactive --agree-tos --redirect --register-unsafely-without-email\n' \
+    printf 'sudo certbot --nginx -d %s --non-interactive --agree-tos --redirect --register-unsafely-without-email\n' \
       "$DOMAIN"
   fi
 }
 
-restore_file() {
-  local dest=$1
-  local backup=$2
-  local created=$3
-  if [[ "$created" != "1" ]]; then
-    return 0
-  fi
-  if [[ -n "$backup" ]]; then
-    sudo cp -a "$backup" "$dest"
-    printf 'Restored %s from %s\n' "$dest" "$backup" >&2
-  else
-    sudo rm -f "$dest"
-    printf 'Removed %s\n' "$dest" >&2
+ensure_build_path() {
+  export PATH="${HOME}/.cargo/bin:/snap/bin:${PATH}"
+  if [[ -f "${HOME}/.cargo/env" ]]; then
+    # shellcheck disable=SC1091
+    source "${HOME}/.cargo/env"
   fi
 }
 
@@ -216,6 +216,11 @@ main() {
         DATA_DIR=$2
         shift 2
         ;;
+      --user)
+        [[ $# -ge 2 ]] || die "--user needs a value"
+        SERVICE_USER=$2
+        shift 2
+        ;;
       --no-tls)
         NO_TLS=1
         shift
@@ -232,12 +237,15 @@ main() {
 
   APP_DIR=$(expand_tilde "$APP_DIR")
   DATA_DIR=$(expand_tilde "$DATA_DIR")
-
-  if [[ "$(id -un)" != $REQUIRED_USER ]]; then
-   die "run as $($REQUIRED_USER) (this shell is $(id -un)). sudo is used only for system changes."
+  if [[ -z "$SERVICE_USER" ]]; then
+    SERVICE_USER=$(id -un)
   fi
+
   if [[ "${EUID}" -eq 0 ]]; then
-    die "do not run as root."
+    die "do not run as root. Run as ${SERVICE_USER} and the script will sudo."
+  fi
+  if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+    die "service user ${SERVICE_USER} does not exist."
   fi
 
   if [[ ! "$PORT" =~ ^[0-9]+$ ]] || ((PORT < 1 || PORT > 65535)); then
@@ -246,31 +254,49 @@ main() {
   if [[ ! "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]]; then
     die "DOMAIN must be a hostname (got ${DOMAIN})."
   fi
-  case "${APP_DIR}${DATA_DIR}${BRANCH}" in
+  case "${APP_DIR}${DATA_DIR}${BRANCH}${SERVICE_USER}" in
     *[[:space:]]*)
-      die "BRANCH, APP_DIR, and DATA_DIR must not contain spaces."
+      die "BRANCH, APP_DIR, DATA_DIR, and SERVICE_USER must not contain spaces."
       ;;
   esac
 
   sudo -v
+
+  if ! command -v nginx >/dev/null 2>&1 && [[ ! -x /usr/sbin/nginx ]]; then
+    die "nginx is not installed. Refusing to install a web server or edit other sites."
+  fi
+  if ! sudo nginx -t; then
+    printf 'nginx -t failed on the existing configuration.\n' >&2
+    printf 'No files were changed. Fix the current nginx sites, then rerun deploy.sh.\n' >&2
+    exit 1
+  fi
+  if [[ ! -d /etc/nginx/sites-available || ! -d /etc/nginx/sites-enabled ]]; then
+    die "nginx has no sites-available and sites-enabled directories. Refusing to invent a layout or edit other configs."
+  fi
+
+  ensure_build_path
 
   local packages=()
   command -v git >/dev/null 2>&1 || packages+=(git)
   command -v gcc >/dev/null 2>&1 || packages+=(gcc)
   command -v curl >/dev/null 2>&1 || packages+=(curl)
   if [[ ${#packages[@]} -gt 0 ]]; then
-    sudo yum install -y "${packages[@]}"
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -qq
+      sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y "${packages[@]}"
+    else
+      die "missing ${packages[*]} and neither apt-get nor yum is available."
+    fi
   fi
 
   if ! command -v cargo >/dev/null 2>&1; then
     curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs \
       | sh -s -- -y --default-toolchain stable --profile minimal
+    ensure_build_path
   fi
-  if [[ -f "${HOME}/.cargo/env" ]]; then
-    # shellcheck disable=SC1091
-    source "${HOME}/.cargo/env"
-  fi
-  command -v cargo >/dev/null 2>&1 || die "cargo is missing after rustup."
+  command -v cargo >/dev/null 2>&1 || die "cargo is missing. Expected it on PATH via /snap/bin or ~/.cargo/bin."
 
   if [[ -e "$APP_DIR" && ! -d "$APP_DIR/.git" ]]; then
     die "${APP_DIR} exists and is not a git checkout."
@@ -288,8 +314,10 @@ main() {
   (cd "$APP_DIR" && cargo build --release --locked)
   [[ -x "${APP_DIR}/target/release/lanes" ]] || die "release binary was not produced."
 
+  local service_group
+  service_group=$(id -gn "$SERVICE_USER")
   sudo mkdir -p "$DATA_DIR"
-  sudo chown "$(id -un):$(id -gn)" "$DATA_DIR"
+  sudo chown "${SERVICE_USER}:${service_group}" "$DATA_DIR"
   local data_file="${DATA_DIR}/chat.phext"
   if [[ -s "$data_file" ]]; then
     printf 'Keeping existing chat data at %s\n' "$data_file"
@@ -314,8 +342,8 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=$(id -un)
-Group=$(id -gn)
+User=${SERVICE_USER}
+Group=${service_group}
 WorkingDirectory=${APP_DIR}
 Environment=LANES_HOST=127.0.0.1
 Environment=LANES_PORT=${PORT}
@@ -354,81 +382,115 @@ EOF
   fi
   printf 'Local health check ok: http://127.0.0.1:%s/api/health\n' "$PORT"
 
-  local mods
-  mods=$(sudo apachectl -M 2>/dev/null || sudo /usr/sbin/apachectl -M 2>/dev/null || true)
-  local modules_path="/etc/httpd/conf.modules.d/phext-lanes-proxy.conf"
-  local modules_backup="" modules_created=0
-  if ! printf '%s\n' "$mods" | grep -q 'proxy_module' \
-    || ! printf '%s\n' "$mods" | grep -q 'proxy_http_module'; then
-    if [[ ! -e /etc/httpd/modules/mod_proxy.so && ! -e /usr/lib64/httpd/modules/mod_proxy.so ]]; then
-      die "mod_proxy is not installed. Install httpd, then rerun deploy.sh."
-    fi
-    local mod_tmp
-    mod_tmp=$(mktemp)
-    cat >"$mod_tmp" <<'EOF'
-LoadModule proxy_module modules/mod_proxy.so
-LoadModule proxy_http_module modules/mod_proxy_http.so
-EOF
-    if [[ -f "$modules_path" ]]; then
-      modules_backup="${modules_path}.bak-$(date +%Y%m%d%H%M%S)"
-      sudo cp -a "$modules_path" "$modules_backup"
-    else
-      modules_created=1
-    fi
-    sudo cp "$mod_tmp" "$modules_path"
-    rm -f "$mod_tmp"
-  fi
+  local available="/etc/nginx/sites-available/${DOMAIN}"
+  local enabled="/etc/nginx/sites-enabled/${DOMAIN}"
+  local stamp site_backup="" site_created=0
+  local enabled_backup="" enabled_created=0 enabled_relinked=0 enabled_old="" enabled_target=""
+  stamp=$(date +%Y%m%d%H%M%S)
 
-  local vhost="/etc/httpd/conf.d/${DOMAIN}.conf"
-  local vhost_backup="" vhost_created=0
-  local vhost_tmp
-  vhost_tmp=$(mktemp)
-  cat >"$vhost_tmp" <<EOF
+  local site_tmp
+  site_tmp=$(mktemp)
+  cat >"$site_tmp" <<EOF
 # Managed by phext-lanes deploy.sh.
-# Reverse proxy only. Other vhosts are not edited.
-<VirtualHost *:80>
-    ServerName ${DOMAIN}
-    ProxyPreserveHost On
-    ProxyPass / http://127.0.0.1:${PORT}/
-    ProxyPassReverse / http://127.0.0.1:${PORT}/
-    ErrorLog logs/${DOMAIN}-error.log
-    CustomLog logs/${DOMAIN}-access.log combined
-</VirtualHost>
+# Reverse proxy for ${DOMAIN} only. Other sites are not edited.
+map \$http_upgrade \$lanes_connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+
+    location / {
+        proxy_pass http://127.0.0.1:${PORT};
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$lanes_connection_upgrade;
+    }
+}
 EOF
-  if vhost_matches "$vhost" "$DOMAIN" "$PORT"; then
-    printf 'Apache already proxies %s to 127.0.0.1:%s\n' "$DOMAIN" "$PORT"
-    rm -f "$vhost_tmp"
+
+  local nginx_changed=0
+  if site_matches "$available" "$DOMAIN" "$PORT"; then
+    printf 'nginx already proxies %s to 127.0.0.1:%s\n' "$DOMAIN" "$PORT"
+    rm -f "$site_tmp"
   else
-    if [[ -f "$vhost" ]]; then
-      vhost_backup="${vhost}.bak-$(date +%Y%m%d%H%M%S)"
-      sudo cp -a "$vhost" "$vhost_backup"
-      printf 'Backed up %s to %s\n' "$vhost" "$vhost_backup"
+    if [[ -e "$available" ]]; then
+      site_backup="${available}.bak-${stamp}"
+      sudo cp -a "$available" "$site_backup"
+      printf 'Backed up %s to %s\n' "$available" "$site_backup"
     else
-      vhost_created=1
+      site_created=1
     fi
-    sudo cp "$vhost_tmp" "$vhost"
-    rm -f "$vhost_tmp"
+    sudo cp "$site_tmp" "$available"
+    rm -f "$site_tmp"
+    nginx_changed=1
   fi
 
-  local restore_vhost=0 restore_modules=0
-  if [[ -n "$vhost_backup" || "$vhost_created" == "1" ]]; then
-    restore_vhost=1
+  if [[ -e "$enabled" && ! -L "$enabled" ]]; then
+    enabled_backup="${enabled}.bak-${stamp}"
+    sudo mv "$enabled" "$enabled_backup"
+    printf 'Backed up %s to %s\n' "$enabled" "$enabled_backup"
+    nginx_changed=1
+  elif [[ -L "$enabled" ]]; then
+    enabled_old=$(sudo readlink "$enabled" || true)
+    enabled_target=$(sudo readlink -f "$enabled" 2>/dev/null || true)
+    if [[ "$enabled_target" != "$available" && "$enabled_old" != "$available" ]]; then
+      sudo ln -sfn "$available" "$enabled"
+      enabled_relinked=1
+      nginx_changed=1
+    fi
   fi
-  if [[ -n "$modules_backup" || "$modules_created" == "1" ]]; then
-    restore_modules=1
+  if [[ ! -L "$enabled" ]]; then
+    sudo ln -s "$available" "$enabled"
+    enabled_created=1
+    nginx_changed=1
   fi
-  if ! sudo apachectl configtest; then
-    printf 'apachectl configtest failed. Restoring files this run changed.\n' >&2
-    restore_file "$vhost" "$vhost_backup" "$restore_vhost"
-    restore_file "$modules_path" "$modules_backup" "$restore_modules"
+
+  rollback_nginx() {
+    if [[ "$enabled_created" == "1" ]]; then
+      sudo rm -f "$enabled"
+    elif [[ "$enabled_relinked" == "1" && -n "$enabled_old" ]]; then
+      sudo ln -sfn "$enabled_old" "$enabled"
+    fi
+    if [[ -n "$enabled_backup" ]]; then
+      sudo mv -f "$enabled_backup" "$enabled"
+    fi
+    if [[ "$site_created" == "1" ]]; then
+      sudo rm -f "$available"
+      printf 'Removed %s\n' "$available" >&2
+    elif [[ -n "$site_backup" ]]; then
+      sudo cp -a "$site_backup" "$available"
+      printf 'Restored %s from %s\n' "$available" "$site_backup" >&2
+    fi
+  }
+
+  if [[ "$nginx_changed" == "1" ]]; then
+    if ! sudo nginx -t; then
+      printf 'nginx -t failed after writing %s. Rolling back that file only.\n' "$available" >&2
+      rollback_nginx
+      exit 1
+    fi
+    if ! sudo systemctl reload nginx; then
+      printf 'systemctl reload nginx failed. Rolling back %s.\n' "$available" >&2
+      rollback_nginx
+      sudo systemctl reload nginx || true
+      exit 1
+    fi
+  fi
+
+  if ! sudo nginx -t; then
+    printf 'nginx -t failed after the reload attempt. Lanes site backup: %s\n' "${site_backup:-none}" >&2
     exit 1
   fi
-  if ! sudo apachectl graceful; then
-    printf 'apachectl graceful failed. Restoring files this run changed.\n' >&2
-    restore_file "$vhost" "$vhost_backup" "$restore_vhost"
-    restore_file "$modules_path" "$modules_backup" "$restore_modules"
-    sudo apachectl graceful || true
-    exit 1
+  if ! systemctl is-active --quiet nginx; then
+    die "nginx is not active."
   fi
 
   local tls_note="skipped (--no-tls)"
@@ -451,7 +513,7 @@ EOF
     fi
     if [[ "$resolved_here" == "1" && -n "$certbot_bin" ]]; then
       local -a cert_args
-      cert_args=(--apache -d "$DOMAIN" --non-interactive --agree-tos --redirect)
+      cert_args=(--nginx -d "$DOMAIN" --non-interactive --agree-tos --redirect)
       if [[ -n "${CERTBOT_EMAIL:-}" ]]; then
         cert_args+=(--email "$CERTBOT_EMAIL")
       else
@@ -482,33 +544,31 @@ EOF
     fi
   fi
 
-  local local_code domain_http domain_https phext_code
+  local local_code nginx_state
   local_code=$(http_code "http://127.0.0.1:${PORT}/api/health")
-  domain_http=$(http_code "http://${DOMAIN}/")
-  domain_https=$(http_code "https://${DOMAIN}/")
-  phext_code=$(http_code "https://phext.io/")
-  if [[ "$phext_code" != "200" ]]; then
-    phext_code=$(http_code "http://phext.io/")
+  if systemctl is-active --quiet nginx; then
+    nginx_state=active
+  else
+    nginx_state=inactive
   fi
 
   printf '\nLanes deploy\n'
   printf '  commit:     %s\n' "$commit"
   printf '  branch:     %s\n' "$BRANCH"
+  printf '  user:       %s\n' "$SERVICE_USER"
   printf '  listen:     127.0.0.1:%s\n' "$PORT"
   printf '  data:       %s\n' "$data_file"
-  printf '  apache:     %s\n' "$vhost"
+  printf '  nginx:      %s (%s)\n' "$available" "$nginx_state"
+  printf '  nginx -t:   ok\n'
   printf '  local:      %s\n' "$local_code"
-  printf '  http://%s: %s\n' "$DOMAIN" "$domain_http"
-  printf '  https://%s: %s\n' "$DOMAIN" "$domain_https"
-  printf '  phext.io:   %s\n' "$phext_code"
   printf '  tls:        %s\n' "$tls_note"
   printf '  dns:        %s -> %s\n' "$DOMAIN" "$EXPECTED_A"
 
   if [[ "$local_code" != "200" ]]; then
     die "local health check returned ${local_code}, expected 200."
   fi
-  if [[ "$phext_code" != "200" ]]; then
-    die "phext.io returned ${phext_code}, expected 200. Apache backup: ${vhost_backup:-none}."
+  if [[ "$nginx_state" != "active" ]]; then
+    die "nginx is not active."
   fi
   if [[ "$tls_failed" == "1" ]]; then
     exit 1

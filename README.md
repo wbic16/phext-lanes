@@ -158,7 +158,7 @@ The page shows that choice as `Posting to: <title> — change`. It does not show
 
 ## Deploy
 
-On the phext.io server, as `ec2-user`:
+On the Ubuntu host for mc.phext.io, as `ubuntu` or `wbic16` (the account that should own the service):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/wbic16/phext-lanes/exo/deploy.sh | bash
@@ -172,7 +172,7 @@ cd phext-lanes
 bash deploy.sh
 ```
 
-That builds this branch, listens on `127.0.0.1:7841`, keeps the phext in `/var/lib/phext-lanes` across redeploys, and reverse-proxies `mc.phext.io` from Apache. Point `mc.phext.io` at `44.248.235.76`. Certbot runs only after that name resolves to the machine the script is running on. The demo cast is written only when that data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. Run `bash deploy.sh` again to redeploy.
+That builds this branch with `/snap/bin` and `~/.cargo/bin` on `PATH`, listens on `127.0.0.1:7841`, and keeps the phext in `/var/lib/phext-lanes` across redeploys. It writes only `/etc/nginx/sites-available/mc.phext.io`, links that file from `sites-enabled`, runs `nginx -t`, and reloads nginx. Other site files are left alone. If nginx is already failing `nginx -t`, the script stops and changes nothing. Point `mc.phext.io` at `44.248.235.76`. Certbot runs `certbot --nginx -d mc.phext.io` only when that name resolves to this machine and certbot is installed; otherwise the script prints the command. The demo cast is written only when the data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. `--user` selects the systemd account (the default is whoever runs the script). Run `bash deploy.sh` again to redeploy.
 
 ## License
 

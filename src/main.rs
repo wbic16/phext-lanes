@@ -27,9 +27,13 @@ struct Cli {
     #[arg(long, global = true)]
     user: Option<String>,
 
-    /// Listen port when no command is given.
-    #[arg(long, global = true, default_value_t = 7841)]
-    port: u16,
+    /// Listen address. Defaults to 127.0.0.1, or LANES_HOST.
+    #[arg(long, global = true)]
+    host: Option<String>,
+
+    /// Listen port when no command is given. Defaults to 7841, or LANES_PORT.
+    #[arg(long, global = true)]
+    port: Option<u16>,
 
     /// Replace the phext with the demo cast, then run the command.
     #[arg(long, global = true)]
@@ -95,6 +99,7 @@ async fn main() -> ExitCode {
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
     let settings = lanes::config::load(cli.user.as_deref(), cli.file.as_deref())?;
+    let listen = lanes::config::load_listen(cli.host.as_deref(), cli.port)?;
     if cli.seed {
         let mut store = Store::open(&settings.file)?;
         store.reseed(Utc::now())?;
@@ -104,7 +109,7 @@ async fn run() -> Result<(), Error> {
         }
     }
     match cli.command {
-        None => lanes::server::serve(settings.file, cli.port).await,
+        None => lanes::server::serve(settings.file, &listen.host, listen.port).await,
         Some(Command::Feed) => {
             let store = Store::open(&settings.file)?;
             print_feed(&store, &settings, cli.details)?;
@@ -404,6 +409,12 @@ mod tests {
             index.command,
             Some(Command::Read { index: true, .. })
         ));
+
+        let hosted =
+            Cli::try_parse_from(["lanes", "--host", "127.0.0.1", "--port", "7841"]).unwrap();
+        assert_eq!(hosted.host.as_deref(), Some("127.0.0.1"));
+        assert_eq!(hosted.port, Some(7841));
+        assert!(hosted.command.is_none());
 
         let titled = Cli::try_parse_from(["lanes", "read", "Fern wall"]).unwrap();
         match titled.command {

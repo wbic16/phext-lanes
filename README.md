@@ -43,9 +43,11 @@ cargo run -- post --text "The ferns on the north wall need more shade" --preview
 cargo run -- read --scroll 1.2.1/1.1.1/1.1.2
 cargo run -- read --index
 cargo run -- --seed
-cargo run -- --port 7841 --file data/chat.phext
+cargo run -- --host 127.0.0.1 --port 7841 --file data/chat.phext
 cargo test
 ```
+
+`--host` defaults to `127.0.0.1` (`LANES_HOST`). `--port` defaults to `7841` (`LANES_PORT`). `--file` and `LANES_FILE` choose the phext.
 
 `--user` accepts a reader id (`mira`) or a display name. Omit `--coord` on `post` and the same word-overlap guess the page uses picks the scroll.
 
@@ -153,6 +155,24 @@ The page shows that choice as `Posting to: <title> — change`. It does not show
 ## Tests
 
 `cargo test` covers coordinate parsing (including the semicolon form), the nine phext break codes, distance weights, the score ordering (a stale subscribed thread beats a brand-new far one), the loud-author cap, keyword prediction, a new-book suggestion, `insert` / `fetch` / `textmap` roundtrips, a scroll inserted between two existing coordinates, rejection of an injected `0x17`, and the seeded cast: Mira opens on Fern wall, Casey opens on General but still sees the quiet voices, and General is flooded while his held messages stay out of the one-line feed. It also checks that the calm feed is one line per thread plus an "N more held" note, that a thread opens by title, that reader and file defaults come from a flag, then the environment, then `lanes.json`, and that the commands are `feed`, `post`, and `read`.
+
+## Deploy
+
+On the phext.io server, as `ec2-user`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/wbic16/phext-lanes/exo/deploy.sh | bash
+```
+
+The same script from a checkout of `exo`:
+
+```bash
+git clone -b exo https://github.com/wbic16/phext-lanes.git
+cd phext-lanes
+bash deploy.sh
+```
+
+That builds this branch, listens on `127.0.0.1:7841`, keeps the phext in `/var/lib/phext-lanes` across redeploys, and reverse-proxies `mc.phext.io` from Apache. The demo cast is written only when that data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. Run `bash deploy.sh` again to redeploy.
 
 ## License
 

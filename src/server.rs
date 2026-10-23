@@ -23,18 +23,37 @@ pub struct AppState {
     store: Arc<Mutex<Store>>,
 }
 
-pub async fn serve(path: std::path::PathBuf, port: u16) -> Result<(), Error> {
+/// `host:port`, with brackets when `host` is an IPv6 address.
+pub fn listen_addr(host: &str, port: u16) -> String {
+    if host.contains(':') && !(host.starts_with('[') && host.ends_with(']')) {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
+pub async fn serve(path: std::path::PathBuf, host: &str, port: u16) -> Result<(), Error> {
+    let host = host.trim();
+    if host.is_empty() {
+        return Err(Error::Bad("listen host is empty".into()));
+    }
     let store = Store::open(path)?;
     let label = store.path().display().to_string();
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
     };
     let app = router(state);
-    let addr = format!("0.0.0.0:{port}");
+    let addr = listen_addr(host, port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|err| Error::Bad(format!("could not listen on {addr}: {err}")))?;
-    println!("Lanes   http://127.0.0.1:{port}");
+    println!("listening  {addr}");
+    let browse = if host == "0.0.0.0" || host == "::" {
+        format!("http://127.0.0.1:{port}")
+    } else {
+        format!("http://{addr}")
+    };
+    println!("Lanes   {browse}");
     println!("phext   {label}");
     axum::serve(listener, app)
         .await
@@ -553,6 +572,15 @@ struct TocThread {
 
 #[cfg(test)]
 mod tests {
+    use super::listen_addr;
+
+    #[test]
+    fn listen_addr_is_localhost_and_brackets_ipv6() {
+        assert_eq!(listen_addr("127.0.0.1", 7841), "127.0.0.1:7841");
+        assert_eq!(listen_addr("::1", 7841), "[::1]:7841");
+        assert_eq!(listen_addr("[::1]", 7841), "[::1]:7841");
+    }
+
     #[test]
     fn the_page_is_one_feed_and_a_compose_box() {
         let page = include_str!("../static/index.html");

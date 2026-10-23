@@ -91,8 +91,8 @@
   .msg p { margin: 0; white-space: pre-wrap; }
   .held {
     margin: 1.75rem 0 0;
-    color: var(--faint);
-    font-size: 0.92rem;
+    color: var(--muted);
+    font-size: 0.95rem;
   }
   .empty { margin: 0; color: var(--muted); }
   .extra {
@@ -134,8 +134,9 @@
     min-height: 2.8rem;
     line-height: 1.45;
   }
-  .hint, .status { margin: 0.15rem 0 0; color: var(--muted); font-size: 0.92rem; }
-  .status { min-height: 1.2em; }
+  .hint, .status { margin: 0.15rem 0 0; font-size: 0.92rem; }
+  .hint { color: var(--muted); }
+  .status { min-height: 1.2em; color: var(--ink); }
   .status.error { color: #8a3a2a; }
   .picker { display: flex; flex-wrap: wrap; gap: 0.45rem 1rem; margin: 0 0 0.7rem; }
   .picker button {

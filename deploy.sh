@@ -7,11 +7,14 @@
 #   bash deploy.sh [--no-tls] [--branch exo] [--port 7841] [--domain mc.phext.io]
 #
 # Flags override the same-named environment variables.
+# mc.phext.io's A record is 44.248.235.76. Certbot still waits until DNS
+# for DOMAIN resolves to this machine's public IP.
 set -euo pipefail
 
 BRANCH="${BRANCH:-exo}"
 PORT="${PORT:-7841}"
 DOMAIN="${DOMAIN:-mc.phext.io}"
+EXPECTED_A="${EXPECTED_A:-44.248.235.76}"
 APP_DIR="${APP_DIR:-${HOME}/phext-lanes}"
 DATA_DIR="${DATA_DIR:-/var/lib/phext-lanes}"
 NO_TLS="${NO_TLS:-0}"
@@ -466,6 +469,11 @@ EOF
       printf 'TLS was not requested from certbot.\n' >&2
       if [[ "$resolved_here" != "1" ]]; then
         printf '%s does not resolve to this server public IP (%s).\n' "$DOMAIN" "${public:-unknown}" >&2
+        printf 'The A record for %s should be %s.\n' "$DOMAIN" "$EXPECTED_A" >&2
+      fi
+      if [[ -n "$public" && "$public" != "$EXPECTED_A" ]]; then
+        printf 'This host public IP is %s. The A record for %s belongs on %s.\n' \
+          "$public" "$DOMAIN" "$EXPECTED_A" >&2
       fi
       if [[ -z "$certbot_bin" ]]; then
         printf 'certbot is not installed. Confirm with: certbot certificates\n' >&2
@@ -494,6 +502,7 @@ EOF
   printf '  https://%s: %s\n' "$DOMAIN" "$domain_https"
   printf '  phext.io:   %s\n' "$phext_code"
   printf '  tls:        %s\n' "$tls_note"
+  printf '  dns:        %s -> %s\n' "$DOMAIN" "$EXPECTED_A"
 
   if [[ "$local_code" != "200" ]]; then
     die "local health check returned ${local_code}, expected 200."

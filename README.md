@@ -172,7 +172,7 @@ cd phext-lanes
 bash deploy.sh
 ```
 
-That builds this branch, listens on `127.0.0.1:7841`, keeps the phext in `/var/lib/phext-lanes` across redeploys, and reverse-proxies `mc.phext.io` from Apache. The demo cast is written only when that data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. Run `bash deploy.sh` again to redeploy.
+That builds this branch, listens on `127.0.0.1:7841`, keeps the phext in `/var/lib/phext-lanes` across redeploys, and reverse-proxies `mc.phext.io` from Apache. Point `mc.phext.io` at `44.248.235.76`. Certbot runs only after that name resolves to the machine the script is running on. The demo cast is written only when that data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. Run `bash deploy.sh` again to redeploy.
 
 ## License
 

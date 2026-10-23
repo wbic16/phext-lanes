@@ -18,7 +18,7 @@ EXPECTED_A="${EXPECTED_A:-44.248.235.76}"
 APP_DIR="${APP_DIR:-${HOME}/phext-lanes}"
 DATA_DIR="${DATA_DIR:-/var/lib/phext-lanes}"
 NO_TLS="${NO_TLS:-0}"
-
+REQUIRED_USER="ubuntu"
 REPO="https://github.com/wbic16/phext-lanes.git"
 SERVICE="phext-lanes.service"
 UNIT_PATH="/etc/systemd/system/${SERVICE}"
@@ -35,7 +35,7 @@ Usage: deploy.sh [--branch NAME] [--port PORT] [--domain NAME]
   DATA_DIR  phext directory kept across redeploys (default /var/lib/phext-lanes)
   --no-tls  do not run certbot
 
-Run as ec2-user. The script uses sudo for yum, systemd, and Apache.
+Run as $REQUIRED_USER. The script uses sudo for yum, systemd, and Apache.
 CERTBOT_EMAIL is optional; without it certbot registers without an email.
 EOF
 }
@@ -233,8 +233,8 @@ main() {
   APP_DIR=$(expand_tilde "$APP_DIR")
   DATA_DIR=$(expand_tilde "$DATA_DIR")
 
-  if [[ "$(id -un)" != "ec2-user" ]]; then
-    die "run as ec2-user (this shell is $(id -un)). sudo is used only for system changes."
+  if [[ "$(id -un)" != $REQUIRED_USER ]]; then
+   die "run as $($REQUIRED_USER) (this shell is $(id -un)). sudo is used only for system changes."
   fi
   if [[ "${EUID}" -eq 0 ]]; then
     die "do not run as root."

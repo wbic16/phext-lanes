@@ -39,6 +39,22 @@ impl World {
             .find(|thread| thread_key(thread.coord) == key)
     }
 
+    pub fn find_lane(&self, id: &str) -> Option<&Thread> {
+        let coord = crate::link::parse_lane_id(id)?;
+        self.thread(&thread_key(coord))
+    }
+
+    /// The message scroll named by a post id. The thread card is not a post.
+    pub fn find_post(&self, id: &str) -> Option<(&Thread, &Message)> {
+        let coord = crate::link::parse_post_id(id)?;
+        let thread = self.thread(&thread_key(coord))?;
+        let message = thread
+            .messages
+            .iter()
+            .find(|message| message.coord == coord)?;
+        Some((thread, message))
+    }
+
     /// A thread title, or a thread or scroll coordinate.
     pub fn find_thread(&self, query: &str) -> Result<&Thread, String> {
         let query = query.trim();
@@ -469,6 +485,12 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert!(store.select(placed.coord).contains("moss on the stone"));
         assert!(store.byte_index().contains("byte"));
+        let world = store.world();
+        let again = world
+            .find_post(&crate::link::post_id(placed.coord))
+            .unwrap();
+        assert_eq!(again.1.text, "A new note about moss on the stone.");
+        assert_eq!(again.0.title, FERN);
     }
 
     #[test]

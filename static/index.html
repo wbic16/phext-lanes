@@ -3,7 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lanes</title>
+<title>%%TITLE%%</title>
+<meta name="description" content="%%DESCRIPTION%%">
+<meta property="og:site_name" content="Lanes">
+<meta property="og:title" content="%%OG_TITLE%%">
+<meta property="og:description" content="%%OG_DESCRIPTION%%">
+<meta property="og:type" content="%%OG_TYPE%%">
+<meta property="og:url" content="%%OG_URL%%">
 <style>
   :root {
     --ink: #221f1b;
@@ -47,7 +53,7 @@
     gap: 1.5rem;
     margin-bottom: 3.5rem;
   }
-  .brand { font-size: 1.15rem; letter-spacing: -0.02em; }
+  .brand { font-size: 1.15rem; letter-spacing: -0.02em; color: inherit; text-decoration: none; }
   .tools { display: flex; gap: 1.1rem; align-items: baseline; }
   select, .quiet {
     background: transparent;
@@ -58,17 +64,30 @@
   select { cursor: pointer; }
   .quiet[aria-pressed="true"] { color: var(--ink); }
   .item { border-bottom: 1px solid var(--line); }
+  .rowline { display: flex; gap: 0.75rem; align-items: baseline; }
   .row {
     display: flex;
     gap: 1.25rem;
     align-items: baseline;
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     text-align: left;
     background: transparent;
     border: 0;
     padding: 1rem 0;
     cursor: pointer;
   }
+  .copylink {
+    flex: none;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    color: var(--faint);
+    font-size: 0.8rem;
+  }
+  .copylink.for-thread { padding: 1rem 0; }
+  .copylink:hover, .copylink:focus-visible { color: var(--muted); }
+  .by .copylink { margin-left: 0.45rem; }
   .title { flex: none; font-weight: 600; }
   .preview {
     min-width: 0;
@@ -87,6 +106,13 @@
   }
   .reading { padding: 0.25rem 0 0.5rem; }
   .msg { margin: 1.35rem 0 1.5rem; }
+  .msg.mark {
+    background: #efe6d4;
+    border-radius: 2px;
+    margin-left: -0.55rem;
+    margin-right: -0.55rem;
+    padding: 0.45rem 0.55rem 0.55rem;
+  }
   .by { margin: 0 0 0.2rem; color: var(--muted); font-size: 0.88rem; }
   .msg p { margin: 0; white-space: pre-wrap; }
   .held {
@@ -159,7 +185,7 @@
 <body>
   <div class="wrap">
     <header>
-      <div class="brand">Lanes</div>
+      <a class="brand" href="/">Lanes</a>
       <div class="tools">
         <select id="user" aria-label="You"></select>
         <button type="button" class="quiet" id="details" aria-pressed="false">details</button>
@@ -185,6 +211,9 @@ const state = {
   data: null,
   open: null,
   room: null,
+  highlight: null,
+  scrollToMark: false,
+  routeGen: 0,
   override: null,
   suggestion: null,
   picker: false,
@@ -242,7 +271,6 @@ async function loadState() {
   state.data = body;
   if (!body.users.some((user) => user.id === state.user)) state.user = body.viewer.id;
   render();
-  if (state.open) await loadRoom(state.open);
 }
 
 function render() {
@@ -265,14 +293,37 @@ function render() {
   paintWhere();
 }
 
+function visibleThreads(threads) {
+  const list = threads.slice();
+  if (state.room && state.open && !list.some((thread) => thread.thread === state.open)) {
+    const marked = state.highlight
+      ? state.room.messages.find((message) => message.id === state.highlight)
+      : null;
+    const message = marked || state.room.messages[0] || null;
+    list.unshift({
+      id: state.room.id,
+      thread: state.room.thread,
+      title: state.room.title,
+      topic: state.room.topic,
+      nearness: "",
+      distance: 0,
+      score: 0,
+      messages: message ? [message] : [],
+      held: [],
+    });
+  }
+  return list;
+}
+
 function renderFeed(threads) {
   const feed = $("feed");
   feed.replaceChildren();
-  if (!threads.length) {
+  const list = visibleThreads(threads);
+  if (!list.length) {
     feed.append(el("p", { class: "empty", text: "Nothing here yet." }));
     return;
   }
-  for (const thread of threads) {
+  for (const thread of list) {
     const item = el("article", { class: "item" });
     const message = thread.messages[0];
     const preview = message ? message.author + ": " + (message.preview || message.text) : "";
@@ -280,21 +331,38 @@ function renderFeed(threads) {
       type: "button",
       class: "row",
       "aria-expanded": state.open === thread.thread ? "true" : "false",
-      onclick: () => toggleThread(thread.thread),
+      onclick: () => toggleThread(thread),
     }, [
       el("span", { class: "title", text: thread.title }),
       preview ? el("span", { class: "preview", text: preview }) : null,
     ]);
-    item.append(row);
-    item.append(el("p", {
-      class: "meta",
-      text: thread.thread + " · " + thread.nearness + " · distance " + thread.distance + " · score " + thread.score.toFixed(2),
-    }));
+    const line = el("div", { class: "rowline" }, [
+      row,
+      el("button", {
+        type: "button",
+        class: "copylink for-thread",
+        text: "link",
+        "aria-label": "Copy link to this thread",
+        onclick: (event) => copyPath(event, "/l/" + thread.id),
+      }),
+    ]);
+    item.append(line);
+    if (thread.nearness) {
+      item.append(el("p", {
+        class: "meta",
+        text: thread.thread + " · " + thread.nearness + " · distance " + thread.distance + " · score " + thread.score.toFixed(2),
+      }));
+    }
     const reading = el("div", { class: "reading" });
     if (state.open === thread.thread) fillReading(reading);
     else reading.hidden = true;
     item.append(reading);
     feed.append(item);
+  }
+  if (state.scrollToMark) {
+    const marked = feed.querySelector(".msg.mark");
+    if (marked) marked.scrollIntoView({ block: "center" });
+    state.scrollToMark = false;
   }
 }
 
@@ -310,23 +378,103 @@ function fillReading(host) {
   for (const message of room.messages) {
     const by = el("p", { class: "by" });
     by.append(message.author + " ");
+    by.append(el("button", {
+      type: "button",
+      class: "copylink",
+      text: "link",
+      "aria-label": "Copy link to this message",
+      onclick: (event) => copyPath(event, "/p/" + message.id),
+    }));
     by.append(el("span", { class: "coord", text: message.coord }));
-    host.append(el("article", { class: "msg" }, [by, el("p", { text: message.text })]));
+    const marked = state.highlight === message.id;
+    host.append(el("article", {
+      class: marked ? "msg mark" : "msg",
+      id: marked ? "marked" : null,
+    }, [by, el("p", { text: message.text })]));
   }
   if (!room.messages.length) host.append(el("p", { class: "empty", text: "Nothing in this thread yet." }));
 }
 
+function routeFromPath() {
+  const parts = location.pathname.split("/").filter(Boolean);
+  if (parts.length === 2 && (parts[0] === "l" || parts[0] === "p")) {
+    return { kind: parts[0], id: parts[1] };
+  }
+  return null;
+}
+
+function go(path) {
+  if (location.pathname !== path) history.pushState(null, "", path);
+}
+
+async function copyPath(event, path) {
+  event.preventDefault();
+  event.stopPropagation();
+  const url = location.origin + path;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(url);
+      setStatus("Link copied.", false);
+      return;
+    }
+  } catch (err) {
+    /* show the address when the clipboard is unavailable */
+  }
+  setStatus(url, false);
+}
+
 async function toggleThread(thread) {
-  if (state.open === thread) {
+  if (state.open === thread.thread) {
+    state.routeGen += 1;
     state.open = null;
     state.room = null;
-    renderFeed(state.data.feed);
+    state.highlight = null;
+    state.scrollToMark = false;
+    go("/");
+    render();
     return;
   }
-  state.open = thread;
+  state.routeGen += 1;
+  state.open = thread.thread;
+  state.highlight = null;
+  state.scrollToMark = false;
   state.room = null;
-  renderFeed(state.data.feed);
-  await loadRoom(thread);
+  if (thread.id) go("/l/" + thread.id);
+  render();
+  await loadRoom(thread.thread);
+}
+
+async function openLinked(route) {
+  const gen = ++state.routeGen;
+  const res = await fetch("/api/" + route.kind + "/" + encodeURIComponent(route.id));
+  const body = await res.json().catch(() => ({}));
+  if (gen !== state.routeGen) return;
+  if (!res.ok) {
+    state.open = null;
+    state.room = null;
+    state.highlight = null;
+    if (state.data) render();
+    setStatus(body.error || "That link doesn't go anywhere.", true);
+    return;
+  }
+  state.open = body.thread;
+  state.room = body;
+  state.highlight = body.highlight || null;
+  state.scrollToMark = Boolean(state.highlight);
+  if (state.data) render();
+}
+
+async function applyRoute() {
+  const route = routeFromPath();
+  if (!route) {
+    state.open = null;
+    state.room = null;
+    state.highlight = null;
+    state.scrollToMark = false;
+    if (state.data) render();
+    return;
+  }
+  await openLinked(route);
 }
 
 async function loadRoom(thread) {
@@ -440,6 +588,8 @@ async function place(event) {
   state.suggestion = null;
   setStatus("Posted to " + body.title + ".", false);
   await loadState();
+  if (routeFromPath()) await applyRoute();
+  else if (state.open) await loadRoom(state.open);
   await runSuggest();
 }
 
@@ -461,21 +611,24 @@ async function resetDemo(button) {
   }
   state.open = null;
   state.room = null;
+  state.highlight = null;
   state.override = null;
   $("text").value = "";
   setStatus("Demo restored.", false);
   await loadState();
+  await applyRoute();
   await runSuggest();
 }
 
 $("user").addEventListener("change", () => {
   state.user = $("user").value;
   localStorage.setItem("lanes.user", state.user);
-  state.open = null;
-  state.room = null;
   state.override = null;
   setStatus("", false);
-  loadState().then(() => runSuggest()).catch((err) => setStatus(err.message, true));
+  loadState()
+    .then(() => applyRoute())
+    .then(() => runSuggest())
+    .catch((err) => setStatus(err.message, true));
 });
 
 $("details").addEventListener("click", () => {
@@ -506,7 +659,12 @@ $("composer").addEventListener("submit", (event) => {
   place(event).catch((err) => setStatus(err.message, true));
 });
 
+window.addEventListener("popstate", () => {
+  applyRoute().catch((err) => setStatus(err.message, true));
+});
+
 loadState()
+  .then(() => applyRoute())
   .then(() => runSuggest())
   .catch((err) => {
     $("feed").replaceChildren(el("p", { class: "empty", text: err.message }));

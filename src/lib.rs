@@ -10,6 +10,7 @@ pub mod calm;
 pub mod config;
 pub mod coord;
 pub mod error;
+pub mod link;
 pub mod model;
 pub mod rank;
 pub mod seed;

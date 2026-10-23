@@ -16,6 +16,8 @@ The cast is fictional: Mira Quill, Jules Fen, Ada North, Ren Sato, and Casey Hor
 
 You land on Mira's feed. Fern wall and Seed swap lead, because those are her interests. Each thread is one line. Click it to read the messages underneath. The box at the bottom says where the next message will go (`Posting to: Fern wall — change`). Enter posts. Shift+Enter adds a line. **change** picks another thread by name. **details** shows coordinates, scores, and who was held back.
 
+Each thread, and each message inside it, has a quiet **link**. `/l/…` opens that thread. `/p/…` opens the thread with that message marked. The address comes from the phext coordinate, so it still works after a restart or a redeploy. An unknown address says it doesn't go anywhere.
+
 The name at the top switches reader. Casey's feed opens on General, and he still only gets two lines, so the quieter voices stay visible. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
 
 ## CLI

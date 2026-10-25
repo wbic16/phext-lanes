@@ -12,19 +12,19 @@ Open http://127.0.0.1:7841. The first run writes `data/chat.phext` with a Genera
 
 ---
 
-Predictive multi-chat, stored as one [phext](https://mirrorborn.us) file. The page is one feed: a line for each relevant thread, then a compose box. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
+Predictive multi-chat, stored as one [phext](https://mirrorborn.us) file. The page is one feed: a line for each relevant thread, then a compose box. Each line shows the thread's title, its newest note, and how many notes it holds and how recent the last one is. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
 
 The cast is fictional: Mira Quill, Jules Fen, Ada North, Ren Sato, and Casey Horn. Casey is the hyper-poster.
 
 ## On the page
 
-With the demo cast seeded, you land on Mira's feed. Fern wall and Seed swap lead, because those are her interests. Each thread is one line. Click it to read the messages underneath. The box at the bottom says where the next message will go (`Posting to: Fern wall — change`). Enter posts. Shift+Enter adds a line. **change** picks another thread by name. **details** shows coordinates, scores, and who was held back.
+With the demo cast seeded, you land on Mira's feed. Fern wall and Seed swap lead, because those are her interests. Each thread is one line. Click it to read the messages underneath, numbered in order with who wrote each and when. With a thread open, the box replies to it. **Start a thread** sends just the next message to a new thread, then the box goes back to replying. The box at the bottom says where the next message will go (`Posting to: Fern wall — change`). Enter posts. Shift+Enter adds a line. **change** picks another thread by name. **details** shows coordinates, scores, and who was held back.
 
 Each thread, and each message inside it, has a quiet **link**. The address is always the full nine-part phext coordinate. A thread is its card scroll: `/l/1.2.1/1.1.1/1.1.1` opens Fern wall. A message is its own scroll: `/p/1.2.1/1.1.1/1.1.2` opens Fern wall with that message marked. A section of ordinary text is its first scroll, `/l/1.1.1/1.1.1/2.1.1`. Shorter or looser forms redirect to the nine-part one: a six-part thread (`/l/1.2.1/1.1.1`), semicolons in place of slashes, and links from older builds (`/l/k…`, `/p/k…`, `/l/s…`). An unknown address says it doesn't go anywhere.
 
 To link from a message, type the nine-part address. A thread card such as `1.2.1/1.1.1/1.1.1` links to that thread; any other scroll such as `1.2.1/1.1.1/1.1.2` links to that message. `/l/…` or `/p/…` in front picks the kind explicitly. Messages in an open thread alternate background shades so neighbouring scrolls are easy to tell apart.
 
-The name at the top switches reader. Casey's feed opens on General, and he still only gets two lines, so the quieter voices stay visible. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
+The name at the top switches reader. Casey's feed opens on General. Other readers only see two lines of his, so the quieter voices stay visible in their feeds. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
 
 **fork** downloads this phext. An open thread also has a fork of just that thread. The menu switches fabric. The default fabric keeps `/l/…` and `/p/…`. Another fabric lives at `/f/<name>/…`, in `data/fabrics/<name>.phext` locally and `/var/lib/phext-lanes/fabrics/<name>.phext` on the server. **create fabric** is for [founding plot holders in Tessera](https://mirrorborn.us). Until that check is connected, the server allows it only with the admin token in `/etc/phext-lanes/admin.env`, which `deploy.sh` creates on the server and does not print. Browsing, permalinks, and fork stay open.
 
@@ -47,6 +47,30 @@ LANES_OWNERS=github:12345,stewart@example.com
 GitHub's id is the numeric id, not the login. An email matches when the provider sends one. Google does. GitHub does when the address on the profile is public. Owners are members the first time they sign in. They do not need an invite.
 
 Named fabrics under `/f/<name>/` stay public to read, including their permalinks and fork. That is the incipit and demo-fabric behavior. The default fabric is the group chat: when owners are set, `/`, `/l/…`, `/p/…`, the JSON for those, and `/chat.phext` are members-only. A non-member who signs in sees a short page that asks for an invite, and does not get the text.
+
+## Limits
+
+How much the feed shows, and how fast people may write, are settings rather than constants.
+
+| Limit | Env | Default | Who can change it |
+|---|---|---|---|
+| Posts before an author is filtered | `LANES_LOUD_AT` | 8 | server, lane owner |
+| Lines a filtered author keeps in other feeds | `LANES_AUTHOR_CAP` | 2 | server, lane owner |
+| Active (ranked) threads in the feed | `LANES_MAX_THREADS` | 8 | server, lane owner |
+| Messages per page in a thread | `LANES_PAGE_SIZE` | 40 | server, lane owner |
+| Messages before a thread can flood | `LANES_FLOOD_MIN_MESSAGES` | 10 | server, lane owner |
+| One author's share that floods a thread | `LANES_FLOOD_SHARE` | 0.7 | server, lane owner |
+| Sign-in attempts per address, per 10 min | `LANES_AUTH_PER_IP` | 20 | server |
+| Writes per address, per 10 min | `LANES_WRITES_PER_IP` | 40 | server |
+| Writes per account, per 10 min | `LANES_WRITES_PER_ACCOUNT` | 30 | server |
+
+The server's values come from the environment, then `"limits"` in `lanes.json` (`{"limits": {"max_threads": 20}}`), then the defaults above. An out-of-range or misspelled limit stops the server with a message that names it. On the server, `deploy.sh` writes `/etc/phext-lanes/limits.env` with every line commented out, and the service loads it.
+
+A lane's owner can change the feed limits in the browser: open **details**, edit the **Limits** fields, and **Save limits**. A blank field uses the server's value, shown faintly. **Use server values** clears them all. The overrides live in the lane's own phext, in a settings scroll at `5.1.1/1.1.2/1.1.1` in the roster library, so a fork keeps them. Rate limits protect the whole server and stay with the operator.
+
+The owners of a lane are everyone in `LANES_OWNERS`, plus the people named in its settings scroll. Creating a fabric in the browser names you there. A fabric made before that has no named owner, so only `LANES_OWNERS` can change it.
+
+`POST /api/limits` (or `/f/<name>/api/limits`) takes `{"max_threads": 12, ...}` from a signed-in owner and replaces the lane's overrides; `{}` clears them. `GET /api/state` returns `limits` with `values`, `defaults`, `overrides`, and `editable`.
 
 ## Invites
 
@@ -198,7 +222,7 @@ Nearness, shown only under details: 0 subscribed, 1–3 next door, 4–12 same w
 
 ### The lane
 
-An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in one reader's feed, wherever those lines would have ranked. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
+An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in another reader's feed, wherever those lines would have ranked. Your own posts are never held back in your own feed. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Both numbers are the defaults; see [Limits](#limits). Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
 
 General is marked flooded, under details, when one author wrote at least 70% of a room of 10 or more messages. Casey is 12 of 15 there. Fern wall is half Casey and is not marked; the cap still holds him to two lines.
 

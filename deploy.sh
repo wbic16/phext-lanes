@@ -459,6 +459,38 @@ EOF
     sudo chmod 600 "$owners_file"
     printf 'Wrote %s (mode 0600). Fill in LANES_OWNERS before inviting anyone.\n' "$owners_file"
   fi
+  local limits_file="/etc/phext-lanes/limits.env"
+  if sudo test -f "$limits_file"; then
+    printf 'Keeping %s\n' "$limits_file"
+  else
+    local limits_tmp
+    limits_tmp=$(mktemp)
+    cat >"$limits_tmp" <<'EOF'
+# Server-wide limits. Uncomment a line to change it, then restart:
+#   sudo systemctl restart phext-lanes
+# A lane's owner can override the feed limits (not the rate limits) in the
+# browser, under details.
+#
+# Feed
+#LANES_LOUD_AT=8
+#LANES_AUTHOR_CAP=2
+#LANES_MAX_THREADS=8
+#LANES_PAGE_SIZE=40
+#LANES_FLOOD_MIN_MESSAGES=10
+#LANES_FLOOD_SHARE=0.7
+#
+# Rate limits, per ten minutes
+#LANES_AUTH_PER_IP=20
+#LANES_WRITES_PER_IP=40
+#LANES_WRITES_PER_ACCOUNT=30
+EOF
+    sudo mkdir -p /etc/phext-lanes
+    sudo cp "$limits_tmp" "$limits_file"
+    rm -f "$limits_tmp"
+    sudo chown root:root "$limits_file"
+    sudo chmod 644 "$limits_file"
+    printf 'Wrote %s with every limit at its default, commented out.\n' "$limits_file"
+  fi
   if [[ -s "$data_file" ]]; then
     printf 'Keeping existing chat data at %s\n' "$data_file"
     if [[ "$EMPTY" == "1" ]]; then
@@ -501,6 +533,7 @@ Environment=LANES_PUBLIC_ORIGIN=https://${DOMAIN}
 EnvironmentFile=-/etc/phext-lanes/oauth.env
 EnvironmentFile=-/etc/phext-lanes/admin.env
 EnvironmentFile=-/etc/phext-lanes/owners.env
+EnvironmentFile=-/etc/phext-lanes/limits.env
 ExecStart=${APP_DIR}/target/release/lanes --host 127.0.0.1 --port ${PORT} --file ${data_file}
 Restart=on-failure
 RestartSec=2
@@ -775,6 +808,7 @@ EOF
   printf '  fabrics:    %s\n' "$fabrics_dir"
   printf '  admin:      %s\n' "$token_file"
   printf '  owners:     /etc/phext-lanes/owners.env\n'
+  printf '  limits:     /etc/phext-lanes/limits.env\n'
   printf '  invites:    %s/invites.json (created by lanes invite; mode 0600)\n' "$DATA_DIR"
   printf '  nginx:      %s (%s)\n' "$available" "$nginx_state"
   printf '  nginx -t:   ok\n'

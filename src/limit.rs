@@ -8,9 +8,6 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 const WINDOW: Duration = Duration::from_secs(10 * 60);
-const AUTH_PER_IP: usize = 20;
-const WRITES_PER_IP: usize = 40;
-const WRITES_PER_ACCOUNT: usize = 30;
 
 #[derive(Clone, Copy)]
 pub enum Bucket {
@@ -33,7 +30,16 @@ pub struct Limiter {
 
 impl Limiter {
     pub fn standard() -> Self {
-        Self::with_caps(AUTH_PER_IP, WRITES_PER_IP, WRITES_PER_ACCOUNT)
+        Self::from_limits(&crate::config::Limits::default())
+    }
+
+    /// The rate caps from the server's configured limits.
+    pub fn from_limits(limits: &crate::config::Limits) -> Self {
+        Self::with_caps(
+            limits.auth_per_ip,
+            limits.writes_per_ip,
+            limits.writes_per_account,
+        )
     }
 
     pub fn with_caps(auth_per_ip: usize, writes_per_ip: usize, writes_per_account: usize) -> Self {

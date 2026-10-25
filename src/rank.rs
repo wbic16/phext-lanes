@@ -6,23 +6,17 @@
 //! Distance is weighted so a library step (16) dominates a book step (1).
 //! A subscribed thread therefore stays above a brand-new far thread.
 //!
-//! After threads are ordered, an author with at least [`LOUD_AT`] messages
-//! may occupy at most [`AUTHOR_CAP`] lines in the whole feed. Everyone else
-//! is left intact. The overflow is reported as a lane.
+//! After threads are ordered, an author with at least `loud_at` messages
+//! may occupy at most `author_cap` lines in the whole feed. Everyone else
+//! is left intact. The overflow is reported as a lane. Both numbers, and the
+//! number of ranked threads, come from [`Limits`].
 
 use chrono::{DateTime, Utc};
 use libphext::phext::Coordinate;
 
+pub use crate::config::Limits;
 use crate::coord::{self, thread_key, topic_key};
 use crate::model::{self, Message, Thread};
-
-pub const AUTHOR_CAP: usize = 2;
-/// Authors with at least this many messages are loud. Only they are capped.
-/// A reader with a handful of notes is left intact.
-pub const LOUD_AT: usize = 8;
-pub const MAX_THREADS: usize = 8;
-const FLOOD_MIN_MESSAGES: usize = 10;
-const FLOOD_SHARE: f64 = 0.70;
 
 #[derive(Debug, Clone)]
 pub struct Feed {
@@ -114,10 +108,23 @@ pub fn build_feed(
     threads: &[Thread],
     interests: &[Coordinate],
     now: DateTime<Utc>,
-    cap: usize,
-    max_threads: usize,
+    limits: &Limits,
 ) -> Feed {
-    let cap = cap.max(1);
+    build_feed_for(threads, interests, now, limits, None)
+}
+
+/// [`build_feed`] for one reader. The reader's own posts are never held:
+/// the cap keeps other voices from flooding a feed, and nobody needs
+/// protecting from themselves. `reader` is a [`Message::poster_key`].
+pub fn build_feed_for(
+    threads: &[Thread],
+    interests: &[Coordinate],
+    now: DateTime<Utc>,
+    limits: &Limits,
+    reader: Option<&str>,
+) -> Feed {
+    let cap = limits.author_cap.max(1);
+    let max_threads = limits.max_threads.max(1);
     let mut volume: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for thread in threads {
         if thread.plain {
@@ -164,7 +171,11 @@ pub fn build_feed(
                 continue;
             }
             let key = message.poster_key().to_string();
-            let limit = if volume.get(key.as_str()).copied().unwrap_or(0) >= LOUD_AT {
+            if reader.is_some_and(|reader| reader == key) {
+                admitted.push(message);
+                continue;
+            }
+            let limit = if volume.get(key.as_str()).copied().unwrap_or(0) >= limits.loud_at {
                 cap
             } else {
                 usize::MAX
@@ -225,7 +236,7 @@ fn lane_mut<'a>(lanes: &'a mut Vec<Lane>, author: &str) -> &'a mut Lane {
     lanes.last_mut().expect("just pushed")
 }
 
-pub fn map_of(threads: &[Thread], interests: &[Coordinate]) -> Vec<MapEntry> {
+pub fn map_of(threads: &[Thread], interests: &[Coordinate], limits: &Limits) -> Vec<MapEntry> {
     let mut entries: Vec<MapEntry> = threads
         .iter()
         .map(|thread| {
@@ -245,7 +256,7 @@ pub fn map_of(threads: &[Thread], interests: &[Coordinate]) -> Vec<MapEntry> {
                 majority_author,
                 majority_count,
                 majority_share,
-                flooded: is_flooded(thread.messages.len(), majority_share),
+                flooded: limits.is_flooded(thread.messages.len(), majority_share),
             }
         })
         .collect();
@@ -267,10 +278,6 @@ pub fn majority(messages: &[Message]) -> (Option<String>, usize, f64) {
         .expect("non-empty");
     let share = count as f64 / messages.len() as f64;
     (Some(author.to_string()), count, share)
-}
-
-pub fn is_flooded(count: usize, share: f64) -> bool {
-    count >= FLOOD_MIN_MESSAGES && share >= FLOOD_SHARE
 }
 
 /// A new book on the reader's home shelf. Same placement as a suggestion
@@ -581,8 +588,7 @@ mod tests {
             &[far.clone(), near.clone()],
             &[interest],
             now,
-            AUTHOR_CAP,
-            MAX_THREADS,
+            &Limits::default(),
         );
         assert_eq!(feed.threads[0].title, "Fern wall");
         assert_eq!(feed.threads[0].nearness, "subscribed");
@@ -606,7 +612,7 @@ mod tests {
             "",
             vec![message("1.2.1/1.2.1/1.1.2", "Mira Quill", 5, "new", now)],
         );
-        let feed = build_feed(&[older, newer], &[fern, swap], now, AUTHOR_CAP, MAX_THREADS);
+        let feed = build_feed(&[older, newer], &[fern, swap], now, &Limits::default());
         assert_eq!(feed.threads[0].title, "Seed swap");
         assert_eq!(feed.threads[0].distance, 0);
         assert_eq!(feed.threads[1].distance, 0);
@@ -639,17 +645,19 @@ mod tests {
             &[hall_thread, garden_thread],
             &[interest],
             now,
-            AUTHOR_CAP,
-            MAX_THREADS,
+            &Limits::default(),
         );
-        assert_eq!(admitted_by(&feed, "Casey Horn"), AUTHOR_CAP);
+        assert_eq!(
+            admitted_by(&feed, "Casey Horn"),
+            Limits::default().author_cap
+        );
         let lane = feed
             .lanes
             .iter()
             .find(|lane| lane.author == "Casey Horn")
             .unwrap();
         assert_eq!(lane.held, 7);
-        assert_eq!(lane.shown, AUTHOR_CAP);
+        assert_eq!(lane.shown, Limits::default().author_cap);
         assert!(feed
             .threads
             .iter()
@@ -661,7 +669,7 @@ mod tests {
             .map(|thread| thread.admitted.len())
             .sum();
         let share = admitted_by(&feed, "Casey Horn") as f64 / shown as f64;
-        assert!(share <= AUTHOR_CAP as f64 / shown as f64);
+        assert!(share <= Limits::default().author_cap as f64 / shown as f64);
         assert!(share < 0.75, "capped share was {share}");
     }
 
@@ -772,11 +780,47 @@ mod tests {
             "",
             vec![message("1.2.1/1.1.1/1.1.2", "Mira Quill", 3, "ferns", now)],
         );
-        let feed = build_feed(&[prose, chat], &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        let feed = build_feed(&[prose, chat], &[interest], now, &Limits::default());
         assert_eq!(feed.threads.len(), 1);
         assert_eq!(feed.threads[0].title, "Fern wall");
         assert!(feed.lanes.is_empty());
         assert_eq!(admitted_by(&feed, "phext"), 0);
+    }
+
+    #[test]
+    fn a_reader_is_never_held_back_from_their_own_posts() {
+        let now = fixed();
+        let interest = parse_coord("1.1.1/1.1.1/1.1.1").unwrap();
+        let threads: Vec<Thread> = (1..=Limits::default().max_threads)
+            .map(|book| {
+                let mut note = message(
+                    &format!("1.1.1/1.1.{book}/1.1.2"),
+                    "wbic16",
+                    book as i64,
+                    "solo",
+                    now,
+                );
+                note.who = "google:1".into();
+                thread(&format!("1.1.1/1.1.{book}/1.1.1"), "Solo", "", vec![note])
+            })
+            .collect();
+        let others = build_feed(&threads, &[interest], now, &Limits::default());
+        let shown = |feed: &Feed| {
+            feed.threads
+                .iter()
+                .filter(|t| !t.admitted.is_empty())
+                .count()
+        };
+        assert_eq!(shown(&others), Limits::default().author_cap);
+        let own = build_feed_for(
+            &threads,
+            &[interest],
+            now,
+            &Limits::default(),
+            Some("google:1"),
+        );
+        assert_eq!(shown(&own), Limits::default().max_threads);
+        assert!(own.threads.iter().all(|t| t.held.is_empty()));
     }
 
     #[test]
@@ -796,13 +840,13 @@ mod tests {
             same.push(note);
         }
         let hall = thread("1.1.1/1.1.1/1.1.1", "Hall", "", same);
-        let feed = build_feed(&[hall], &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        let feed = build_feed(&[hall], &[interest], now, &Limits::default());
         let admitted = feed.threads[0]
             .admitted
             .iter()
             .filter(|message| message.who == "github:1")
             .count();
-        assert_eq!(admitted, AUTHOR_CAP);
+        assert_eq!(admitted, Limits::default().author_cap);
 
         let mut split = Vec::new();
         for (index, who) in ["github:1", "github:2"].iter().enumerate() {
@@ -838,13 +882,13 @@ mod tests {
                 .map(|(_, note)| note)
                 .collect(),
         );
-        let feed = build_feed(&[left, right], &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        let feed = build_feed(&[left, right], &[interest], now, &Limits::default());
         let admitted = feed
             .threads
             .iter()
             .flat_map(|thread| thread.admitted.iter())
             .filter(|message| message.author == "Ann")
             .count();
-        assert_eq!(admitted, AUTHOR_CAP * 2);
+        assert_eq!(admitted, Limits::default().author_cap * 2);
     }
 }

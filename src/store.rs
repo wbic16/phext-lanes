@@ -16,13 +16,15 @@ use crate::coord::{
     thread_key, topic_key, Target,
 };
 use crate::error::Error;
-use crate::model::{self, Message, Scroll, Thread, User};
+use crate::model::{self, LaneSettings, Message, Scroll, Thread, User};
 use crate::seed;
 
 #[derive(Debug, Clone)]
 pub struct World {
     pub users: Vec<User>,
     pub threads: Vec<Thread>,
+    /// Owners and limit overrides from the settings scroll, if any.
+    pub settings: LaneSettings,
 }
 
 impl World {
@@ -282,8 +284,7 @@ impl Store {
             };
             let mut user = existing;
             user.name = name;
-            let mut doc = self.doc.clone();
-            doc = phext::insert(doc, coord, &user.to_scroll());
+            let doc = phext::replace(&self.doc, coord, &user.to_scroll());
             self.persist(doc)?;
             return Ok(false);
         }
@@ -325,10 +326,20 @@ impl Store {
         if user.interests.len() > 8 {
             user.interests.remove(1);
         }
-        let mut doc = self.doc.clone();
-        doc = phext::insert(doc, at, &user.to_scroll());
+        let doc = phext::replace(&self.doc, at, &user.to_scroll());
         self.persist(doc)?;
         Ok(())
+    }
+
+    /// Write the settings scroll, replacing any earlier one.
+    pub fn save_settings(&mut self, settings: &LaneSettings) -> Result<(), Error> {
+        let at = settings_coord();
+        let doc = if self.filled.contains(&at) {
+            phext::replace(&self.doc, at, &settings.to_scroll())
+        } else {
+            phext::insert(self.doc.clone(), at, &settings.to_scroll())
+        };
+        self.persist(doc)
     }
 
     pub fn place(&mut self, post: Post) -> Result<Placed, Error> {
@@ -459,12 +470,17 @@ impl Store {
 }
 
 /// One scan of the phext: the reader world, and every coordinate that has text.
+fn settings_coord() -> Coordinate {
+    coord::parse_coord(coord::SETTINGS_COORD).expect("settings coordinate")
+}
+
 fn indexed(doc: &str) -> (World, BTreeSet<Coordinate>) {
     if doc.is_empty() {
         return (
             World {
                 users: Vec::new(),
                 threads: Vec::new(),
+                settings: LaneSettings::default(),
             },
             BTreeSet::new(),
         );
@@ -487,12 +503,14 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
         return World {
             users: Vec::new(),
             threads: Vec::new(),
+            settings: LaneSettings::default(),
         };
     }
     let mut coords: Vec<Coordinate> = map.keys().copied().collect();
     coords.sort();
 
     let mut users = Vec::new();
+    let mut settings = LaneSettings::default();
     let mut cards: BTreeMap<String, (String, String, String)> = BTreeMap::new();
     let mut messages: BTreeMap<String, Vec<Message>> = BTreeMap::new();
     let mut anchors: BTreeMap<String, Coordinate> = BTreeMap::new();
@@ -505,8 +523,10 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
             continue;
         }
         if is_roster(coord) {
-            if let Some(Scroll::User(user)) = model::parse_scroll(raw) {
-                users.push(user);
+            match model::parse_scroll(raw) {
+                Some(Scroll::User(user)) => users.push(user),
+                Some(Scroll::Settings(found)) if coord == settings_coord() => settings = found,
+                _ => {}
             }
             continue;
         }
@@ -544,7 +564,7 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
                     });
                     continue;
                 }
-                Scroll::Card { .. } | Scroll::User(_) => {}
+                Scroll::Card { .. } | Scroll::User(_) | Scroll::Settings(_) => {}
             }
         }
         let text = raw.replace("\r\n", "\n").trim().to_string();
@@ -598,7 +618,11 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
         });
     }
     threads.sort_by(|a, b| a.coord.cmp(&b.coord).then(a.plain.cmp(&b.plain)));
-    World { users, threads }
+    World {
+        users,
+        threads,
+        settings,
+    }
 }
 
 fn next_free(filled: &BTreeSet<Coordinate>, anchor: Coordinate) -> Coordinate {
@@ -800,8 +824,7 @@ mod tests {
             &world.threads,
             &mira.interests,
             now,
-            rank::AUTHOR_CAP,
-            rank::MAX_THREADS,
+            &rank::Limits::default(),
         );
         assert_eq!(feed.threads[0].title, FERN);
         assert_eq!(feed.threads[0].distance, 0);
@@ -813,7 +836,7 @@ mod tests {
         let pos = |name: &str| titles.iter().position(|title| *title == name).unwrap();
         assert!(pos(FERN) < pos(seed::SWAP));
         assert!(pos(seed::SWAP) < pos(HALL));
-        assert!(admitted_by(&feed, CASEY) <= rank::AUTHOR_CAP);
+        assert!(admitted_by(&feed, CASEY) <= rank::Limits::default().author_cap);
         let lane = feed.lanes.iter().find(|lane| lane.author == CASEY).unwrap();
         assert!(lane.held >= 15, "held {}", lane.held);
         assert!(lane.held > admitted_by(&feed, CASEY));
@@ -827,7 +850,7 @@ mod tests {
         assert!(casey >= 10);
         assert!(casey * 100 / hall.messages.len() >= 70);
         let (_, _, share) = rank::majority(&hall.messages);
-        assert!(rank::is_flooded(hall.messages.len(), share));
+        assert!(rank::Limits::default().is_flooded(hall.messages.len(), share));
         assert_eq!(
             feed.threads
                 .iter()
@@ -848,8 +871,7 @@ mod tests {
                 &world.threads,
                 &user.interests,
                 now,
-                rank::AUTHOR_CAP,
-                rank::MAX_THREADS,
+                &rank::Limits::default(),
             );
             feed.threads[0].title.clone()
         };
@@ -863,10 +885,9 @@ mod tests {
             &world.threads,
             &casey.interests,
             now,
-            rank::AUTHOR_CAP,
-            rank::MAX_THREADS,
+            &rank::Limits::default(),
         );
-        assert!(admitted_by(&feed, CASEY) <= rank::AUTHOR_CAP);
+        assert!(admitted_by(&feed, CASEY) <= rank::Limits::default().author_cap);
         let hall = feed
             .threads
             .iter()
@@ -1101,6 +1122,35 @@ mod tests {
     }
 
     #[test]
+    fn settings_save_replace_and_stay_out_of_the_chat() {
+        let path = demo_path();
+        let _file = TempFile(path.clone());
+        let mut store = Store::open(&path).unwrap();
+        let threads = store.world().threads.len();
+        let users = store.world().users.len();
+        assert_eq!(store.world().settings, LaneSettings::default());
+        let mut settings = LaneSettings {
+            owners: vec!["github:100".into()],
+            ..LaneSettings::default()
+        };
+        settings.limits.max_threads = Some(3);
+        store.save_settings(&settings).unwrap();
+        settings.limits.max_threads = Some(4);
+        settings.limits.loud_at = Some(2);
+        store.save_settings(&settings).unwrap();
+        let reopened = Store::open(&path).unwrap();
+        let world = reopened.world();
+        assert_eq!(world.settings, settings);
+        assert!(world.settings.is_owner("github:100"));
+        assert!(!world.settings.is_owner("github:101"));
+        assert_eq!(world.threads.len(), threads);
+        assert_eq!(world.users.len(), users);
+        let raw = reopened.select(settings_coord());
+        assert_eq!(raw.matches("kind: settings").count(), 1, "{raw}");
+        assert!(raw.contains("max_threads: 4"), "{raw}");
+    }
+
+    #[test]
     fn oauth_profile_becomes_a_roster_scroll_and_interests_follow_use() {
         let path = temp_path();
         let _file = TempFile(path.clone());
@@ -1127,5 +1177,12 @@ mod tests {
         let user = store.world().find_user("github:100").unwrap();
         assert_eq!(user.name, "Octo Cat");
         assert_eq!(user.interests.len(), 1);
+        let at = store.roster_coord("github:100").unwrap();
+        let raw = store.select(at);
+        assert_eq!(
+            raw.matches("kind: user").count(),
+            1,
+            "updates replace: {raw}"
+        );
     }
 }

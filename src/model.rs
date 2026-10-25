@@ -79,6 +79,7 @@ pub struct Thread {
 #[derive(Debug, Clone)]
 pub enum Scroll {
     User(User),
+    Settings(LaneSettings),
     Card {
         topic: String,
         title: String,
@@ -90,6 +91,30 @@ pub enum Scroll {
         ts: DateTime<Utc>,
         text: String,
     },
+}
+
+/// Who owns a lane and how its feed is limited. One scroll at
+/// [`crate::coord::SETTINGS_COORD`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LaneSettings {
+    /// Provider ids (`github:123`) that may edit this lane's settings.
+    pub owners: Vec<String>,
+    pub limits: crate::config::LimitOverrides,
+}
+
+impl LaneSettings {
+    pub fn to_scroll(&self) -> String {
+        let mut lines = vec![
+            "kind: settings".to_string(),
+            format!("owners: {}", self.owners.join(" ")),
+        ];
+        lines.extend(self.limits.lines());
+        lines.join("\n")
+    }
+
+    pub fn is_owner(&self, who: &str) -> bool {
+        !who.is_empty() && self.owners.iter().any(|owner| owner == who)
+    }
 }
 
 impl User {
@@ -241,6 +266,23 @@ pub fn parse_scroll(raw: &str) -> Option<Scroll> {
 
     let kind = headers.get("kind").map(String::as_str).unwrap_or("");
     match kind {
+        "settings" => {
+            let owners = headers
+                .get("owners")
+                .map(String::as_str)
+                .unwrap_or("")
+                .split_whitespace()
+                .filter(|who| crate::oauth::valid_who(who))
+                .map(str::to_string)
+                .collect();
+            let mut limits = crate::config::LimitOverrides::default();
+            for key in crate::config::LimitOverrides::KEYS {
+                if let Some(value) = headers.get(key) {
+                    limits.read(key, value);
+                }
+            }
+            Some(Scroll::Settings(LaneSettings { owners, limits }))
+        }
         "user" => {
             let id_raw = headers.get("id")?.trim();
             let id = if id_raw.contains(':') {

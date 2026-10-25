@@ -45,6 +45,7 @@ impl Limiter {
         }
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn hit(&self, bucket: Bucket, id: &str) -> Result<(), ()> {
         let (prefix, limit) = match bucket {
             Bucket::AuthIp => ("a", self.auth_per_ip),

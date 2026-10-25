@@ -197,8 +197,15 @@
     min-height: 2.8rem;
     line-height: 1.45;
   }
+  .you { margin: -2.2rem 0 2.2rem; color: var(--muted); font-size: 0.95rem; }
+  .you[hidden] { display: none; }
+  .you button { background: transparent; border: 0; padding: 0; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+  .welcome { margin: 0 0 2.5rem; }
+  .welcome p { margin: 0.85rem 0; }
+  .welcome button { margin-top: 1.1rem; background: transparent; border: 0; padding: 0; text-decoration: underline; text-underline-offset: 3px; }
   .hint, .status { margin: 0.15rem 0 0; font-size: 0.92rem; }
   .hint { color: var(--muted); }
+  .hint button { background: transparent; border: 0; padding: 0; color: inherit; text-decoration: underline; text-underline-offset: 3px; }
   .status { min-height: 1.2em; color: var(--ink); }
   .status.error { color: var(--danger); }
   .picker { display: flex; flex-wrap: wrap; gap: 0.45rem 1rem; margin: 0 0 0.7rem; }
@@ -213,9 +220,14 @@
   body.details #reason { display: block; }
   @media (max-width: 640px) {
     body { font-size: 17px; }
-    .wrap { padding-top: 2.5rem; }
+    .wrap { padding: 1.25rem 1rem 12rem; }
+    header { flex-wrap: wrap; align-items: flex-start; gap: 0.75rem; margin-bottom: 1.75rem; }
+    .tools { justify-content: flex-start; gap: 0.85rem 1rem; }
+    .you { margin: 0 0 1.5rem; }
     .row { gap: 0.75rem; }
     .preview { white-space: normal; }
+    .dock-inner { padding-left: 1rem; padding-right: 1rem; }
+    textarea, input, select { font-size: 16px; }
   }
 </style>
 </head>
@@ -236,6 +248,13 @@
         <button type="button" class="quiet" id="details" aria-pressed="false">details</button>
       </div>
     </header>
+    <p id="you" class="you" hidden>Signed in as <span id="you-name"></span> · <button type="button" id="signout">Sign out</button></p>
+    <div id="welcome" class="welcome" hidden>
+      <p>Lanes is one quiet feed for this chat.</p>
+      <p>Each line is a thread. Open it to read the notes inside.</p>
+      <p>The box at the bottom starts a thread, or replies to the one it names.</p>
+      <button type="button" id="welcome-go">Continue</button>
+    </div>
     <div id="create-panel" class="create" hidden>
       <p id="create-note"><a href="https://mirrorborn.us">Founding plot holders in Tessera can create fabrics.</a></p>
       <div class="create-row">
@@ -257,7 +276,7 @@
       <div id="picker" class="picker" hidden></div>
       <label class="sr" for="text">Message</label>
       <textarea id="text" rows="2" maxlength="4000" placeholder="Write a message"></textarea>
-      <p class="hint">Posting to: <span id="where">…</span> — <button type="button" id="change">change</button></p>
+      <p class="hint"><span id="kind">Reply</span> · Posting to: <span id="where">…</span> — <button type="button" id="change">change</button> — <button type="button" id="fresh">Start a thread</button></p>
       <p id="reason"></p>
       <p id="status" class="status" role="status"></p>
     </div>
@@ -281,6 +300,7 @@ const state = {
   tocKey: "",
   tocText: "",
   session: null,
+  fresh: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -320,8 +340,32 @@ function whereTitle() {
   return state.suggestion.title || "a new thread";
 }
 
+function replyTarget() {
+  if (state.open && state.room && !state.room.plain && state.room.thread === state.open) {
+    return { thread: state.room.thread, title: state.room.title };
+  }
+  return null;
+}
+
 function paintWhere() {
-  $("where").textContent = whereTitle();
+  const freshButton = $("fresh");
+  if (freshButton) freshButton.textContent = state.fresh ? "Reply instead" : "Start a thread";
+  let kind = "Reply";
+  let title = whereTitle();
+  if (state.fresh) {
+    kind = "Start a thread";
+    title = (state.suggestion && state.suggestion.title) || "a new thread";
+  } else if (!state.override) {
+    const open = replyTarget();
+    if (open) title = open.title;
+    else if (state.suggestion && state.suggestion.new_thread) {
+      kind = "Start a thread";
+      title = state.suggestion.title || "a new thread";
+    }
+  }
+  const kindNode = $("kind");
+  if (kindNode) kindNode.textContent = kind;
+  $("where").textContent = title;
   const reason = $("reason");
   if (state.override) {
     reason.textContent = state.override.thread;
@@ -346,12 +390,24 @@ function paintSignIn() {
   const session = state.session || {};
   const button = $("signin");
   const choices = $("signin-choices");
+  const you = $("you");
   choices.hidden = true;
   if (session.signed_in) {
-    button.textContent = session.handle || "Sign out";
+    button.hidden = true;
+    you.hidden = false;
+    $("you-name").textContent = session.name || session.handle || "you";
     return;
   }
+  button.hidden = false;
   button.textContent = "Sign in";
+  you.hidden = true;
+}
+
+function maybeWelcome() {
+  const on = new URLSearchParams(location.search).get("welcome") === "1";
+  $("welcome").hidden = !on;
+  $("feed").hidden = on;
+  $("composer").hidden = on;
 }
 
 async function loadSession() {
@@ -363,12 +419,15 @@ async function loadSession() {
 
 async function loadState() {
   const gen = ++state.loadGen;
-  const res = await fetch(api("/api/state?user=" + encodeURIComponent(state.user)));
+  const signedIn = state.session && state.session.signed_in;
+  const query = signedIn ? "" : ("?user=" + encodeURIComponent(state.user));
+  const res = await fetch(api("/api/state" + query));
   const body = await res.json();
   if (!res.ok) throw new Error(body.error || "Could not open the chat");
   if (gen !== state.loadGen) return;
   state.data = body;
-  if (body.users.length && !body.users.some((user) => user.id === state.user)) state.user = body.viewer.id;
+  if (signedIn && body.viewer && body.viewer.id) state.user = body.viewer.id;
+  else if (body.users.length && !body.users.some((user) => user.id === state.user)) state.user = body.viewer.id;
   render();
 }
 
@@ -376,24 +435,22 @@ function render() {
   const data = state.data;
   if (!data) return;
   renderFabrics(data);
+  maybeWelcome();
   const select = $("user");
-  if (!data.users.length) {
+  const signedIn = state.session && state.session.signed_in;
+  if (signedIn || !data.users.length) {
     select.hidden = true;
     select.replaceChildren();
-    renderFeed(data.feed);
-    $("held").hidden = true;
-    renderExtra();
-    paintWhere();
-    return;
+  } else {
+    select.hidden = false;
+    const ids = data.users.map((user) => user.id).join(",");
+    if (select.dataset.ids !== ids) {
+      select.replaceChildren();
+      for (const user of data.users) select.append(el("option", { value: user.id, text: user.name }));
+      select.dataset.ids = ids;
+    }
+    select.value = data.viewer.id;
   }
-  select.hidden = false;
-  const ids = data.users.map((user) => user.id).join(",");
-  if (select.dataset.ids !== ids) {
-    select.replaceChildren();
-    for (const user of data.users) select.append(el("option", { value: user.id, text: user.name }));
-    select.dataset.ids = ids;
-  }
-  select.value = data.viewer.id;
   renderFeed(data.feed);
   const held = data.feed.reduce((sum, thread) => sum + thread.held.length, 0);
   const note = $("held");
@@ -456,7 +513,9 @@ function renderFeed(threads) {
     const item = el("article", { class: "item" });
     const message = thread.messages[0];
     const named = message && message.author && message.author !== "phext" && !thread.plain;
-    const preview = message ? (named ? message.author + ": " : "") + (message.preview || message.text) : "";
+    const preview = message
+      ? (named ? message.author + ": " : "") + (message.preview || message.text)
+      : (thread.plain ? "" : "No notes yet");
     const row = el("button", {
       type: "button",
       class: "row",
@@ -557,7 +616,7 @@ function fillReading(host) {
       id: marked ? "marked" : null,
     }, body));
   }
-  if (!room.messages.length) host.append(el("p", { class: "empty", text: "Nothing in this thread yet." }));
+  if (!room.messages.length) host.append(el("p", { class: "empty", text: "No notes yet. The box below replies here, or starts a thread." }));
   if (room.more) {
     host.append(el("button", {
       type: "button",
@@ -858,8 +917,9 @@ function choose(thread) {
 async function runSuggest() {
   const gen = ++state.suggestGen;
   const url = new URL(api("/api/suggest"), location.origin);
-  url.searchParams.set("user", state.user);
+  if (!(state.session && state.session.signed_in)) url.searchParams.set("user", state.user);
   url.searchParams.set("text", $("text").value);
+  if (state.fresh) url.searchParams.set("fresh", "1");
   const res = await fetch(url);
   const body = await res.json();
   if (gen !== state.suggestGen) return;
@@ -891,7 +951,14 @@ async function place(event) {
     return;
   }
   setStatus("", false);
-  const coord = state.override ? state.override.thread : (state.suggestion && state.suggestion.coord) || "";
+  const open = !state.fresh && !state.override ? replyTarget() : null;
+  const coord = state.fresh
+    ? ((state.suggestion && state.suggestion.coord) || "")
+    : state.override
+      ? state.override.thread
+      : open
+        ? open.thread
+        : ((state.suggestion && state.suggestion.coord) || "");
   const res = await fetch(api("/api/post"), {
     method: "POST",
     headers: writeHeaders({ "content-type": "application/json" }),
@@ -970,14 +1037,32 @@ $("user").addEventListener("change", () => {
     .catch((err) => setStatus(err.message, true));
 });
 
+$("signout").addEventListener("click", () => {
+  fetch("/auth/logout", { method: "POST", headers: writeHeaders({}) })
+    .then(() => location.assign("/"))
+    .catch((err) => setStatus(err.message, true));
+});
+
+$("welcome-go").addEventListener("click", () => {
+  const url = new URL(location.href);
+  url.searchParams.delete("welcome");
+  history.replaceState(null, "", url.pathname + url.search);
+  maybeWelcome();
+  render();
+});
+
+$("fresh").addEventListener("click", () => {
+  state.fresh = !state.fresh;
+  state.override = null;
+  state.picker = false;
+  renderPicker();
+  paintWhere();
+  runSuggest().catch((err) => setStatus(err.message, true));
+});
+
 $("signin").addEventListener("click", () => {
   const session = state.session || {};
-  if (session.signed_in) {
-    fetch("/auth/logout", { method: "POST", headers: writeHeaders({}) })
-      .then(() => location.reload())
-      .catch((err) => setStatus(err.message, true));
-    return;
-  }
+  if (session.signed_in) return;
   if (!session.ready || !(session.providers || []).length) {
     setStatus("Sign-in is not set up yet.", false);
     return;

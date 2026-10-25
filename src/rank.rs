@@ -273,6 +273,29 @@ pub fn is_flooded(count: usize, share: f64) -> bool {
     count >= FLOOD_MIN_MESSAGES && share >= FLOOD_SHARE
 }
 
+/// A new book on the reader's home shelf. Same placement as a suggestion
+/// that shared no words. Used when someone explicitly starts a thread.
+pub fn suggest_fresh(
+    threads: &[Thread],
+    interests: &[Coordinate],
+    text: &str,
+    _now: DateTime<Utc>,
+) -> Suggestion {
+    let home = home_thread(threads, interests);
+    let fresh = fresh_thread(threads, home);
+    let title = model::title_from_text(text);
+    let topic = topic_name(threads, fresh);
+    Suggestion {
+        coord: coord::with_scroll(fresh, 2),
+        thread: fresh,
+        title,
+        topic,
+        new_thread: true,
+        overlap: Vec::new(),
+        reason: "A new thread.".into(),
+    }
+}
+
 pub fn suggest(
     threads: &[Thread],
     interests: &[Coordinate],

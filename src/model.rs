@@ -102,11 +102,25 @@ impl User {
             .join(" ");
         format!(
             "kind: user\nid: {}\nname: {}\nblurb: {}\ninterests: {interests}",
-            coord::one_line(&self.id),
+            member_id(&self.id),
             coord::one_line(&self.name),
             coord::one_line(&self.blurb),
         )
     }
+}
+
+/// Roster ids keep a single colon (`github:100`). Other punctuation is dropped.
+pub fn member_id(id: &str) -> String {
+    let mut out = String::new();
+    for ch in id.chars() {
+        if ch.is_ascii_alphanumeric() || ch == ':' || ch == '-' || ch == '_' {
+            out.push(ch);
+        }
+        if out.len() >= 90 {
+            break;
+        }
+    }
+    out
 }
 
 pub fn format_card(topic: &str, title: &str, keywords: &str) -> String {
@@ -228,7 +242,12 @@ pub fn parse_scroll(raw: &str) -> Option<Scroll> {
     let kind = headers.get("kind").map(String::as_str).unwrap_or("");
     match kind {
         "user" => {
-            let id = headers.get("id")?.trim().to_lowercase();
+            let id_raw = headers.get("id")?.trim();
+            let id = if id_raw.contains(':') {
+                member_id(id_raw)
+            } else {
+                member_id(&id_raw.to_lowercase())
+            };
             let name = headers.get("name")?.trim().to_string();
             if id.is_empty() || name.is_empty() {
                 return None;
@@ -367,6 +386,25 @@ mod tests {
             Some(Scroll::User(parsed)) => {
                 assert_eq!(parsed.id, "mira");
                 assert_eq!(parsed.interests, user.interests);
+            }
+            other => panic!("parsed {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_provider_id_roundtrips_without_losing_the_colon() {
+        let user = User {
+            id: "github:100".into(),
+            name: "The Octocat".into(),
+            blurb: String::new(),
+            interests: Vec::new(),
+        };
+        match parse_scroll(&user.to_scroll()) {
+            Some(Scroll::User(parsed)) => {
+                assert_eq!(parsed.id, "github:100");
+                assert_eq!(parsed.name, "The Octocat");
+                assert!(parsed.interests.is_empty());
+                assert!(parsed.blurb.is_empty());
             }
             other => panic!("parsed {other:?}"),
         }

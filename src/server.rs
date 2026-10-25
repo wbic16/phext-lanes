@@ -18,6 +18,7 @@ use crate::coord::{
 };
 use crate::error::Error;
 use crate::fabric::{self, day_stamp, download_filename, FabricError, ParsedRoute, Route};
+use crate::invite::{self, Owners};
 use crate::limit::{Bucket, Limiter};
 use crate::link::{lane_id, post_id, section_lane_id};
 use crate::model::{self, preview, Message};
@@ -35,16 +36,22 @@ pub struct AppState {
     auth: Arc<dyn PlotHolderCheck>,
     oauth: Arc<Oauth>,
     limits: Arc<Limiter>,
+    owners: Arc<Owners>,
+    invites: std::path::PathBuf,
 }
 
 impl AppState {
     pub fn open(path: std::path::PathBuf) -> Result<Self, Error> {
-        Ok(Self {
-            hub: Arc::new(fabric::Hub::open(path)?),
-            auth: Arc::new(AdminTokenCheck::from_env()),
-            oauth: Arc::new(Oauth::from_env()),
-            limits: Arc::new(Limiter::standard()),
-        })
+        let invites = invite::resolve(&path);
+        let owners = Arc::new(Owners::from_env());
+        Self::assemble(
+            path,
+            Arc::new(AdminTokenCheck::from_env()),
+            Arc::new(Oauth::from_env()),
+            Arc::new(Limiter::standard()),
+            owners,
+            invites,
+        )
     }
 
     pub fn with_auth(
@@ -65,11 +72,35 @@ impl AppState {
         oauth: Arc<Oauth>,
         limits: Arc<Limiter>,
     ) -> Result<Self, Error> {
+        Self::with_owners(path, auth, oauth, limits, Owners::parse(""))
+    }
+
+    fn with_owners(
+        path: std::path::PathBuf,
+        auth: Arc<dyn PlotHolderCheck>,
+        oauth: Arc<Oauth>,
+        limits: Arc<Limiter>,
+        owners: Owners,
+    ) -> Result<Self, Error> {
+        let invites = invite::beside(&path);
+        Self::assemble(path, auth, oauth, limits, Arc::new(owners), invites)
+    }
+
+    fn assemble(
+        path: std::path::PathBuf,
+        auth: Arc<dyn PlotHolderCheck>,
+        oauth: Arc<Oauth>,
+        limits: Arc<Limiter>,
+        owners: Arc<Owners>,
+        invites: std::path::PathBuf,
+    ) -> Result<Self, Error> {
         Ok(Self {
             hub: Arc::new(fabric::Hub::open(path)?),
             auth,
             oauth,
             limits,
+            owners,
+            invites,
         })
     }
 }
@@ -97,6 +128,11 @@ pub async fn serve(path: std::path::PathBuf, host: &str, port: u16) -> Result<()
         println!("sign-in  ready");
     } else {
         println!("sign-in  not configured; writes are closed");
+    }
+    if state.owners.invite_only() {
+        println!("members  invite-only ({} owners)", state.owners.len());
+    } else {
+        println!("members  open demo");
     }
     let app = router(state);
     let addr = listen_addr(host, port);
@@ -167,24 +203,46 @@ fn handle(
     let fabric = parsed.fabric.as_deref();
     let query = query_map(uri);
     match &parsed.route {
-        Route::Home => Ok(page(app, fabric, headers, PageView::Home)?),
-        Route::Lane(id) => Ok(page(app, fabric, headers, PageView::Lane(id))?),
-        Route::Post(id) => Ok(page(app, fabric, headers, PageView::Post(id))?),
-        Route::Download { lane } => Ok(download(app, fabric, lane.as_deref())?),
+        Route::Home => guarded_page(app, fabric, headers, PageView::Home, "/"),
+        Route::Lane(id) => guarded_page(
+            app,
+            fabric,
+            headers,
+            PageView::Lane(id),
+            &format!("/l/{id}"),
+        ),
+        Route::Post(id) => guarded_page(
+            app,
+            fabric,
+            headers,
+            PageView::Post(id),
+            &format!("/p/{id}"),
+        ),
+        Route::Download { lane } => {
+            admit_read(app, headers, fabric)?;
+            Ok(download(app, fabric, lane.as_deref())?)
+        }
         Route::Health => Ok(Json(serde_json::json!({"ok": true})).into_response()),
         Route::State => {
+            let session = admit_read(app, headers, fabric)?;
             let user = query.get("user").map(String::as_str);
-            Ok(Json(state_of(app, fabric, user)?).into_response())
+            Ok(Json(state_of(app, fabric, user, session.as_ref())?).into_response())
         }
         Route::ApiLane(id) => {
+            let session = admit_read(app, headers, fabric)?;
             let offset = query
                 .get("offset")
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(0);
-            Ok(Json(open_lane(app, fabric, id, offset)?).into_response())
+            let actor = session.as_ref().map(|session| session.who.as_str());
+            Ok(Json(open_lane(app, fabric, id, offset, actor)?).into_response())
         }
-        Route::ApiPost(id) => Ok(Json(open_post(app, fabric, id)?).into_response()),
+        Route::ApiPost(id) => {
+            admit_read(app, headers, fabric)?;
+            Ok(Json(open_post(app, fabric, id)?).into_response())
+        }
         Route::Room => {
+            admit_read(app, headers, fabric)?;
             let thread = query
                 .get("thread")
                 .map(String::as_str)
@@ -192,15 +250,24 @@ fn handle(
                 .to_string();
             Ok(Json(room(app, fabric, &thread)?).into_response())
         }
-        Route::Suggest => Ok(Json(suggest(
-            app,
-            fabric,
-            query.get("user").map(String::as_str),
-            query.get("text").map(String::as_str).unwrap_or(""),
-        )?)
-        .into_response()),
-        Route::Toc => Ok(Json(toc(app, fabric)?).into_response()),
+        Route::Suggest => {
+            let session = admit_read(app, headers, fabric)?;
+            Ok(Json(suggest(
+                app,
+                fabric,
+                session.as_ref(),
+                query.get("user").map(String::as_str),
+                query.get("text").map(String::as_str).unwrap_or(""),
+                query.get("fresh").is_some_and(|value| value == "1"),
+            )?)
+            .into_response())
+        }
+        Route::Toc => {
+            admit_read(app, headers, fabric)?;
+            Ok(Json(toc(app, fabric)?).into_response())
+        }
         Route::Scroll => {
+            admit_read(app, headers, fabric)?;
             let coord = query.get("coord").map(String::as_str).unwrap_or("");
             Ok(scroll(app, fabric, coord)?)
         }
@@ -215,6 +282,18 @@ fn handle(
         ),
         Route::AuthCallback(provider) => auth_callback(app, headers, provider, &query),
         Route::Logout => logout(app, headers),
+        Route::Join(token) => {
+            if fabric.is_some() {
+                return Err(AppError::missing());
+            }
+            join(app, headers, token)
+        }
+        Route::JoinBack => {
+            if fabric.is_some() {
+                return Err(AppError::missing());
+            }
+            join_back(app, headers)
+        }
         Route::Access => Ok(Json(serde_json::json!({
             "create": app.auth.plot_holder_check(&bearer(headers)),
         }))
@@ -229,6 +308,22 @@ fn handle(
         )?)
         .into_response()),
     }
+}
+
+fn guarded_page(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    view: PageView<'_>,
+    next: &str,
+) -> Result<Response, AppError> {
+    if let Err(err) = admit_read(app, headers, fabric) {
+        if err.gate {
+            return Ok(gate_page(app, headers, next));
+        }
+        return Err(err);
+    }
+    page(app, fabric, headers, view)
 }
 
 enum PageView<'a> {
@@ -304,6 +399,7 @@ fn state_of(
     app: &AppState,
     fabric: Option<&str>,
     user: Option<&str>,
+    session: Option<&oauth::Session>,
 ) -> Result<StateDto, AppError> {
     let names = app.hub.list()?;
     let meta = FabricView {
@@ -320,10 +416,11 @@ fn state_of(
             })
             .collect(),
         fork: format!("{}/chat.phext", public_prefix(fabric)),
-        demo: fabric.is_none(),
+        demo: fabric.is_none() && !app.owners.invite_only(),
+        invite_only: app.owners.invite_only() && fabric.is_none(),
     };
     app.hub
-        .with_store(fabric, |store| snapshot(store, user, &meta))?
+        .with_store(fabric, |store| snapshot(store, user, session, &meta))?
 }
 
 fn open_lane(
@@ -331,14 +428,27 @@ fn open_lane(
     fabric: Option<&str>,
     id: &str,
     offset: usize,
+    actor: Option<&str>,
 ) -> Result<OpenDto, AppError> {
     app.hub.with_store(fabric, |store| {
-        let world = store.world();
-        let thread = world.find_lane(id).ok_or_else(AppError::missing)?;
-        Ok(OpenDto {
-            highlight: None,
-            room: room_dto(thread, offset),
-        })
+        let (dto, plain, coord) = {
+            let world = store.world();
+            let thread = world.find_lane(id).ok_or_else(AppError::missing)?;
+            (
+                OpenDto {
+                    highlight: None,
+                    room: room_dto(thread, offset),
+                },
+                thread.plain,
+                thread.coord,
+            )
+        };
+        if offset == 0 && !plain {
+            if let Some(actor) = actor {
+                store.note_interest(actor, coord)?;
+            }
+        }
+        Ok(dto)
     })?
 }
 
@@ -372,17 +482,19 @@ fn room(app: &AppState, fabric: Option<&str>, thread: &str) -> Result<RoomDto, A
 fn suggest(
     app: &AppState,
     fabric: Option<&str>,
+    session: Option<&oauth::Session>,
     user: Option<&str>,
     text: &str,
+    fresh: bool,
 ) -> Result<SuggestDto, AppError> {
     app.hub.with_store(fabric, |store| {
         let world = store.world();
-        let interests = if world.users.is_empty() {
-            Vec::new()
+        let interests = viewer_interests(world, session, user)?;
+        let suggestion = if fresh {
+            rank::suggest_fresh(&world.threads, &interests, text, Utc::now())
         } else {
-            resolve_user(&world, user)?.interests.clone()
+            rank::suggest(&world.threads, &interests, text, Utc::now())
         };
-        let suggestion = rank::suggest(&world.threads, &interests, text, Utc::now());
         Ok(SuggestDto {
             coord: format_coord(suggestion.coord),
             thread: thread_key(suggestion.thread),
@@ -447,30 +559,46 @@ fn post_message(
     body: &[u8],
 ) -> Result<PostOut, AppError> {
     let session = guard_write(app, headers)?;
+    if app.owners.invite_only() && fabric.is_none() {
+        ensure_member(app, &session)?;
+    }
     let body: PostBody = serde_json::from_slice(body).map_err(|_| AppError::bad("bad json"))?;
     app.hub.with_store(fabric, |store| {
-        let target = {
+        // The signed-in person is the reader. `user` remains in the JSON so
+        // older pages still post, and it no longer picks a fictional reader.
+        let _ = body.user.as_str();
+        let (author, target) = {
             let world = store.world();
-            let user = resolve_user(world, Some(&body.user))?.clone();
-            if let Some(coord) = body
+            let member = world.find_user(&session.who);
+            let author = member
+                .map(|user| user.name.clone())
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| session.handle.clone());
+            let interests = member
+                .map(|user| user.interests.clone())
+                .unwrap_or_default();
+            let target = if let Some(coord) = body
                 .coord
                 .as_deref()
                 .filter(|value| !value.trim().is_empty())
             {
                 parse_target(coord).map_err(AppError::bad)?
             } else {
-                let suggestion =
-                    rank::suggest(&world.threads, &user.interests, &body.text, Utc::now());
+                let suggestion = rank::suggest(&world.threads, &interests, &body.text, Utc::now());
                 Target::Scroll(suggestion.coord)
-            }
+            };
+            (author, target)
         };
         let placed = store.place(Post {
-            author: session.handle.clone(),
+            author,
             who: session.who.clone(),
             text: body.text,
             target,
             now: Utc::now(),
         })?;
+        if store.world().find_user(&session.who).is_some() {
+            store.note_interest(&session.who, placed.thread)?;
+        }
         Ok(PostOut {
             ok: true,
             id: post_id(placed.coord),
@@ -489,10 +617,11 @@ fn reset(
     fabric: Option<&str>,
     headers: &HeaderMap,
 ) -> Result<serde_json::Value, AppError> {
-    let _session = guard_write(app, headers)?;
-    if fabric.is_some() {
+    let session = guard_write(app, headers)?;
+    if fabric.is_some() || app.owners.invite_only() {
         return Err(AppError::bad("reset is only for the demo fabric"));
     }
+    let _ = session;
     app.hub.with_store(None, |store| {
         store.reseed(Utc::now())?;
         Ok(serde_json::json!({"ok": true}))
@@ -680,14 +809,334 @@ fn guard_write(app: &AppState, headers: &HeaderMap) -> Result<oauth::Session, Ap
 
 fn session_view(app: &AppState, headers: &HeaderMap) -> Response {
     let session = app.oauth.read_session(&oauth::cookie_from_headers(headers));
+    let (member, owner) = match &session {
+        Some(session) => {
+            let owner = app.owners.matches(&session.who, &session.email);
+            let member = app
+                .hub
+                .with_store(None, |store| {
+                    store
+                        .world()
+                        .users
+                        .iter()
+                        .any(|user| user.id == session.who)
+                })
+                .unwrap_or(false);
+            (member || owner, owner)
+        }
+        None => (false, false),
+    };
     Json(serde_json::json!({
         "ready": app.oauth.ready(),
         "signed_in": session.is_some(),
         "handle": session.as_ref().map(|item| item.handle.as_str()).unwrap_or(""),
+        "name": session.as_ref().map(|item| item.name.as_str()).unwrap_or(""),
+        "owner": owner,
+        "member": member,
         "csrf": session.as_ref().map(|item| item.csrf.as_str()).unwrap_or(""),
         "providers": app.oauth.providers(),
     }))
     .into_response()
+}
+
+/// Members-only applies to the default fabric when owners are configured.
+/// Named fabrics stay readable. Returns the session when the caller is a member.
+fn admit_read(
+    app: &AppState,
+    headers: &HeaderMap,
+    fabric: Option<&str>,
+) -> Result<Option<oauth::Session>, AppError> {
+    if fabric.is_some() || !app.owners.invite_only() {
+        return Ok(read_session(app, headers));
+    }
+    let session = read_session(app, headers)
+        .ok_or_else(|| AppError::gate(StatusCode::UNAUTHORIZED, "Sign in to do that."))?;
+    ensure_member(app, &session)?;
+    Ok(Some(session))
+}
+
+fn read_session(app: &AppState, headers: &HeaderMap) -> Option<oauth::Session> {
+    app.oauth.read_session(&oauth::cookie_from_headers(headers))
+}
+
+fn ensure_member(app: &AppState, session: &oauth::Session) -> Result<(), AppError> {
+    let owner = app.owners.matches(&session.who, &session.email);
+    let member = app.hub.with_store(None, |store| {
+        if owner {
+            store.ensure_member(&session.who, &member_label(session))?;
+        }
+        Ok::<bool, Error>(
+            store
+                .world()
+                .users
+                .iter()
+                .any(|user| user.id == session.who),
+        )
+    })??;
+    if member {
+        Ok(())
+    } else {
+        Err(AppError::gate(StatusCode::FORBIDDEN, "Ask for an invite."))
+    }
+}
+
+fn member_label(session: &oauth::Session) -> String {
+    if session.name.trim().is_empty() {
+        session.handle.clone()
+    } else {
+        session.name.clone()
+    }
+}
+
+fn join(app: &AppState, headers: &HeaderMap, token: &str) -> Result<Response, AppError> {
+    limit_join(app, headers)?;
+    if !invite::token_shape(token) {
+        return Ok(invite_notice(
+            app,
+            headers,
+            "That invite is no longer valid.",
+            None,
+        ));
+    }
+    let session = read_session(app, headers);
+    let Some(session) = session else {
+        return Ok(join_signin(app, headers, token));
+    };
+    finish_join(app, headers, &session, token)
+}
+
+fn join_back(app: &AppState, headers: &HeaderMap) -> Result<Response, AppError> {
+    limit_join(app, headers)?;
+    let token = oauth::cookie_value(&oauth::cookie_from_headers(headers), invite::JOIN_COOKIE)
+        .unwrap_or_default();
+    if !invite::token_shape(&token) {
+        return Ok(invite_notice(
+            app,
+            headers,
+            "Ask for an invite.",
+            read_session(app, headers).as_ref(),
+        ));
+    }
+    let Some(session) = read_session(app, headers) else {
+        return Ok(join_signin(app, headers, &token));
+    };
+    finish_join(app, headers, &session, &token)
+}
+
+fn finish_join(
+    app: &AppState,
+    headers: &HeaderMap,
+    session: &oauth::Session,
+    token: &str,
+) -> Result<Response, AppError> {
+    let already = app
+        .hub
+        .with_store(None, |store| {
+            store
+                .world()
+                .users
+                .iter()
+                .any(|user| user.id == session.who)
+        })
+        .unwrap_or(false);
+    if !already {
+        if let Err(fail) = invite::redeem(&app.invites, token, Utc::now()) {
+            return Ok(invite_notice(app, headers, fail.message(), Some(session)));
+        }
+        app.hub.with_store(None, |store| {
+            store.ensure_member(&session.who, &member_label(session))?;
+            Ok::<(), Error>(())
+        })??;
+    }
+    let mut response = redirect("/?welcome=1")?;
+    if let Ok(cookie) = HeaderValue::from_str(&oauth::clear_cookie(
+        invite::JOIN_COOKIE,
+        app.oauth.cookie_secure(),
+    )) {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    Ok(response)
+}
+
+fn join_signin(app: &AppState, headers: &HeaderMap, token: &str) -> Response {
+    let mut response = gate_html(
+        app,
+        headers,
+        None,
+        "Sign in to use your invite. If you don't have one, ask a member for an invite.",
+        "/join/back",
+    );
+    if let Ok(cookie) = HeaderValue::from_str(&oauth::cookie_header(
+        invite::JOIN_COOKIE,
+        token,
+        600,
+        app.oauth.cookie_secure(),
+    )) {
+        response.headers_mut().append(header::SET_COOKIE, cookie);
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn limit_join(app: &AppState, headers: &HeaderMap) -> Result<(), AppError> {
+    if !app.oauth.ready() {
+        return Err(AppError::status(
+            StatusCode::FORBIDDEN,
+            "Sign-in is not set up yet.",
+        ));
+    }
+    if app
+        .limits
+        .hit(Bucket::AuthIp, &client_key(headers))
+        .is_err()
+    {
+        return Err(AppError::status(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Too many requests.",
+        ));
+    }
+    Ok(())
+}
+
+fn gate_page(app: &AppState, headers: &HeaderMap, next: &str) -> Response {
+    let session = read_session(app, headers);
+    let message = if session.is_some() {
+        "This chat is invite-only. Ask for an invite."
+    } else {
+        "This chat is invite-only. Sign in with the link you were sent. If you don't have one, ask a member for an invite."
+    };
+    gate_html(app, headers, session.as_ref(), message, next)
+}
+
+fn invite_notice(
+    app: &AppState,
+    headers: &HeaderMap,
+    message: &str,
+    session: Option<&oauth::Session>,
+) -> Response {
+    gate_html(app, headers, session, message, "/")
+}
+
+fn gate_html(
+    app: &AppState,
+    _headers: &HeaderMap,
+    session: Option<&oauth::Session>,
+    message: &str,
+    next: &str,
+) -> Response {
+    let next = oauth::safe_next(next);
+    let next_q = form_query(&next);
+    let mut links = String::new();
+    if session.is_none() {
+        for provider in app.oauth.providers() {
+            let label = match provider {
+                "github" => "GitHub",
+                "google" => "Google",
+                other => other,
+            };
+            links.push_str(&format!(
+                "<p><a href=\"/auth/{provider}?next={next_q}\">{label}</a></p>\n"
+            ));
+        }
+        if links.is_empty() {
+            links.push_str("<p>Sign-in is not set up yet.</p>\n");
+        }
+    }
+    let who = session
+        .map(|session| {
+            format!(
+                "<p>Signed in as {}.</p>\n",
+                escape_html(&member_label(session))
+            )
+        })
+        .unwrap_or_default();
+    let sign_out = if session.is_some() {
+        "<p><button type=\"button\" id=\"signout\">Sign out</button></p>\n<script>\ndocument.getElementById(\"signout\").addEventListener(\"click\", function () {\n  fetch(\"/api/session\").then(function (res) { return res.json(); }).then(function (me) {\n    return fetch(\"/auth/logout\", { method: \"POST\", headers: { \"x-csrf-token\": me.csrf || \"\" } });\n  }).then(function () { location.href = \"/\"; });\n});\n</script>\n"
+    } else {
+        ""
+    };
+    let status = if session.is_some() {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::UNAUTHORIZED
+    };
+    let html = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="robots" content="noindex">
+<title>Lanes</title>
+<meta property="og:title" content="Lanes">
+<meta property="og:description" content="This chat is invite-only.">
+<style>
+  body {{ margin: 0; min-height: 100vh; background: #f4f1ea; color: #221f1b;
+    font-family: "Iowan Old Style", Palatino, Georgia, serif; font-size: 18px; line-height: 1.45; }}
+  @media (prefers-color-scheme: dark) {{
+    body {{ background: #161411; color: #e4ddd2; }}
+    a, button {{ color: #e4ddd2; }}
+  }}
+  main {{ max-width: 38rem; margin: 0 auto; padding: 18vh 1.5rem; }}
+  a, button {{ color: inherit; font: inherit; background: transparent; border: 0; padding: 0;
+    text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }}
+  p {{ margin: 0.8rem 0; }}
+  @media (max-width: 640px) {{
+    main {{ padding: 12vh 1rem; }}
+    body {{ font-size: 17px; }}
+  }}
+</style>
+</head>
+<body>
+<main>
+  {who}<p>{message}</p>
+  {links}{sign_out}
+</main>
+</body>
+</html>"#,
+        message = escape_html(message),
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    (status, headers, Html(html)).into_response()
+}
+
+fn redirect(location: &str) -> Result<Response, AppError> {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::LOCATION,
+        HeaderValue::from_str(location).map_err(|_| AppError::server("bad redirect"))?,
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    Ok((StatusCode::SEE_OTHER, headers).into_response())
+}
+
+fn form_query(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 fn auth_start(
@@ -875,15 +1324,32 @@ struct FabricView {
     fabrics: Vec<FabricDto>,
     fork: String,
     demo: bool,
+    invite_only: bool,
 }
 
 fn snapshot(
     store: &Store,
     user_query: Option<&str>,
+    session: Option<&oauth::Session>,
     meta: &FabricView,
 ) -> Result<StateDto, AppError> {
     let world = store.world();
-    let (viewer, interests) = if world.users.is_empty() {
+    let (viewer, interests) = if let Some(session) = session {
+        if let Some(user) = world.find_user(&session.who) {
+            let interests = user.interests.clone();
+            (viewer_dto(world, user), interests)
+        } else {
+            (
+                ViewerDto {
+                    id: session.who.clone(),
+                    name: member_label(session),
+                    blurb: String::new(),
+                    interests: Vec::new(),
+                },
+                Vec::new(),
+            )
+        }
+    } else if world.users.is_empty() {
         (
             ViewerDto {
                 id: String::new(),
@@ -894,9 +1360,9 @@ fn snapshot(
             Vec::new(),
         )
     } else {
-        let user = resolve_user(&world, user_query)?;
+        let user = resolve_user(world, user_query)?;
         let interests = user.interests.clone();
-        (viewer_dto(&world, user), interests)
+        (viewer_dto(world, user), interests)
     };
     let now = Utc::now();
     let chat: Vec<crate::model::Thread> = world
@@ -908,6 +1374,15 @@ fn snapshot(
     let feed = rank::build_feed(&chat, &interests, now, rank::AUTHOR_CAP, rank::MAX_THREADS);
     let map = rank::map_of(&chat, &interests);
     let mut feed_rows = feed_dto(&feed);
+    for thread in world.threads.iter().filter(|thread| !thread.plain) {
+        if feed_rows
+            .iter()
+            .any(|row| row.thread == thread_key(thread.coord))
+        {
+            continue;
+        }
+        feed_rows.push(quiet_row(thread));
+    }
     for thread in world.threads.iter().filter(|thread| thread.plain) {
         feed_rows.push(plain_row(thread));
     }
@@ -917,6 +1392,7 @@ fn snapshot(
         fabrics: meta.fabrics.clone(),
         fork: meta.fork.clone(),
         demo: meta.demo,
+        invite_only: meta.invite_only,
         cap: rank::AUTHOR_CAP,
         loud_at: rank::LOUD_AT,
         viewer,
@@ -942,6 +1418,39 @@ fn snapshot(
             .collect(),
         map: map.into_iter().map(map_dto).collect(),
     })
+}
+
+fn viewer_interests(
+    world: &crate::store::World,
+    session: Option<&oauth::Session>,
+    query: Option<&str>,
+) -> Result<Vec<libphext::phext::Coordinate>, AppError> {
+    if let Some(session) = session {
+        return Ok(world
+            .find_user(&session.who)
+            .map(|user| user.interests.clone())
+            .unwrap_or_default());
+    }
+    if world.users.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(resolve_user(world, query)?.interests.clone())
+}
+
+fn quiet_row(thread: &crate::model::Thread) -> FeedThreadDto {
+    FeedThreadDto {
+        id: lane_id(thread.coord),
+        thread: thread_key(thread.coord),
+        topic: thread.topic.clone(),
+        topic_coord: topic_key(thread.coord),
+        title: thread.title.clone(),
+        distance: 0,
+        score: 0.0,
+        nearness: String::new(),
+        messages: Vec::new(),
+        held: Vec::new(),
+        plain: false,
+    }
 }
 
 fn viewer_dto(world: &crate::store::World, user: &crate::model::User) -> ViewerDto {
@@ -1090,14 +1599,12 @@ fn stamp(ts: chrono::DateTime<Utc>) -> String {
 struct AppError {
     status: StatusCode,
     message: String,
+    gate: bool,
 }
 
 impl AppError {
     fn bad(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::BAD_REQUEST,
-            message: message.into(),
-        }
+        Self::status(StatusCode::BAD_REQUEST, message)
     }
     fn missing() -> Self {
         Self::status(StatusCode::NOT_FOUND, "That link doesn't go anywhere.")
@@ -1109,15 +1616,20 @@ impl AppError {
         )
     }
     fn server(message: impl Into<String>) -> Self {
-        Self {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            message: message.into(),
-        }
+        Self::status(StatusCode::INTERNAL_SERVER_ERROR, message)
     }
     fn status(status: StatusCode, message: impl Into<String>) -> Self {
         Self {
             status,
             message: message.into(),
+            gate: false,
+        }
+    }
+    fn gate(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            gate: true,
         }
     }
 }
@@ -1162,6 +1674,7 @@ struct StateDto {
     fabrics: Vec<FabricDto>,
     fork: String,
     demo: bool,
+    invite_only: bool,
     cap: usize,
     loud_at: usize,
     viewer: ViewerDto,
@@ -2309,6 +2822,289 @@ mod http_tests {
         )
         .await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+    }
+
+    fn app_private(owners: &str) -> (Router, Temp) {
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-route-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = AppState::with_owners(
+            dir.join("chat.phext"),
+            Arc::new(crate::auth::AdminTokenCheck::from_token("plot-secret")),
+            Arc::new(crate::oauth::Oauth::test_ready()),
+            Arc::new(crate::limit::Limiter::standard()),
+            crate::invite::Owners::parse(owners),
+        )
+        .unwrap();
+        (router(state), Temp { dir })
+    }
+
+    fn session_headers(cookie: &str, csrf: &str) -> (String, String) {
+        (format!("lanes_session={cookie}"), csrf.to_string())
+    }
+
+    async fn github_session(app: &Router) -> (String, String) {
+        let (status, headers, _) = send_parts(app, get("/auth/github?next=/join/back")).await;
+        assert_eq!(status, StatusCode::FOUND);
+        let pending = set_cookie(&headers, "lanes_oauth");
+        let location = headers.get(header::LOCATION).unwrap().to_str().unwrap();
+        let state = location
+            .split("state=")
+            .nth(1)
+            .unwrap()
+            .split('&')
+            .next()
+            .unwrap();
+        let (status, headers, body) = send_parts(
+            app,
+            Request::builder()
+                .uri(format!("/auth/github/callback?code=ok&state={state}"))
+                .header("cookie", format!("lanes_oauth={pending}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FOUND, "{body}");
+        let cookie = set_cookie(&headers, "lanes_session");
+        let (status, me) = send(
+            app,
+            Request::builder()
+                .uri("/api/session")
+                .header("cookie", format!("lanes_session={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{me}");
+        let me: serde_json::Value = serde_json::from_str(&me).unwrap();
+        assert_eq!(me["name"], "The Octocat");
+        (cookie, me["csrf"].as_str().unwrap().to_string())
+    }
+
+    #[tokio::test]
+    async fn non_members_cannot_read_the_group_and_named_fabrics_stay_open() {
+        let (app, file) = app_private("github:999");
+        let (cookie, csrf) = session_headers(
+            &crate::oauth::Oauth::test_session_cookie(),
+            crate::oauth::TEST_CSRF,
+        );
+        for uri in ["/", "/l/kcre66i9s", "/p/k5v1j4f4ds79m9t"] {
+            let (status, body) = send(
+                &app,
+                Request::builder()
+                    .uri(uri)
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN, "{uri} {body}");
+            assert!(body.contains("Ask for an invite."), "{uri} {body}");
+            assert!(!body.contains("north-wall"), "{uri}");
+            assert!(!body.contains("id=\"text\""), "{uri}");
+        }
+        let (status, body) = send(&app, get("/api/state?user=mira")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body.contains("Sign in to do that."));
+        let (status, body) = send(
+            &app,
+            Request::builder()
+                .uri("/api/l/kcre66i9s")
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("Ask for an invite."));
+        assert!(!body.contains("Fern wall"));
+        let (status, _, fork) = send_parts(&app, get("/chat.phext")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(fork.contains("Sign in to do that."));
+        assert!(!fork.contains("north-wall"));
+        let (status, body) = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/post")
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .header("x-csrf-token", &csrf)
+                .body(Body::from(r#"{"user":"mira","text":"nope"}"#))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert!(body.contains("Ask for an invite."));
+
+        let mut doc = String::new();
+        put_scroll(
+            &mut doc,
+            "1.1.1/1.1.1/1.1.1",
+            "Incipit (It Begins)\nThe opening stays.",
+        );
+        upload(&app, "incipit", &doc).await;
+        let (status, body) = send(&app, get("/f/incipit/api/state?user=x")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("Incipit (It Begins)"));
+        let (status, page) = send(&app, get("/f/incipit/l/s0")).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.contains("The opening stays."));
+        let (status, _, fork) = send_parts(&app, get("/f/incipit/chat.phext")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(fork.contains("The opening stays."));
+        drop(file);
+    }
+
+    #[tokio::test]
+    async fn an_owner_is_the_reader_and_opening_a_thread_fills_interests() {
+        let (app, file) = app_private("github:100,octo@example.com");
+        let cookie = crate::oauth::Oauth::test_session_cookie();
+        let (status, body) = send(
+            &app,
+            Request::builder()
+                .uri("/api/state?user=mira")
+                .header("cookie", format!("lanes_session={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["viewer"]["id"], "github:100");
+        assert_eq!(json["viewer"]["name"], "The Octocat");
+        assert!(json["viewer"]["interests"].as_array().unwrap().is_empty());
+        assert_eq!(json["demo"], false);
+        assert_eq!(json["invite_only"], true);
+        let saved = std::fs::read_to_string(file.dir.join("chat.phext")).unwrap();
+        assert!(saved.contains("id: github:100"), "{saved}");
+        assert!(saved.contains("name: The Octocat"), "{saved}");
+
+        let (status, page) = send(
+            &app,
+            Request::builder()
+                .uri("/l/kcre66i9s")
+                .header("cookie", format!("lanes_session={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.contains("Fern wall"));
+        assert!(page.contains("Signed in as"));
+
+        let (status, me) = send(
+            &app,
+            Request::builder()
+                .uri("/api/session")
+                .header("cookie", format!("lanes_session={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let me: serde_json::Value = serde_json::from_str(&me).unwrap();
+        assert_eq!(status, StatusCode::OK);
+        let csrf = me["csrf"].as_str().unwrap();
+        let (status, posted) = send(
+            &app,
+            Request::builder()
+                .method("POST")
+                .uri("/api/post")
+                .header("content-type", "application/json")
+                .header("cookie", format!("lanes_session={cookie}"))
+                .header("x-csrf-token", csrf)
+                .body(Body::from(
+                    r#"{"user":"mira","text":"The ferns on the north wall need more shade"}"#,
+                ))
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{posted}");
+        let posted: serde_json::Value = serde_json::from_str(&posted).unwrap();
+        assert_eq!(posted["title"], "Fern wall");
+        let saved = crate::store::Store::open(file.dir.join("chat.phext")).unwrap();
+        let member = saved.world().find_user("github:100").unwrap();
+        assert_eq!(member.name, "The Octocat");
+        assert!(
+            member
+                .interests
+                .iter()
+                .any(|coord| crate::coord::thread_key(*coord) == "1.2.1/1.1.1"),
+            "{:?}",
+            member.interests
+        );
+        assert!(saved.doc().contains("author: The Octocat"));
+        assert!(saved.doc().contains("who: github:100"));
+    }
+
+    #[tokio::test]
+    async fn joining_redeems_a_single_use_invite_into_a_roster_scroll() {
+        let (app, file) = app_private("github:999");
+        let invites = crate::invite::beside(&file.dir.join("chat.phext"));
+        let issued = crate::invite::create(&invites, 1, None, Utc::now()).unwrap();
+        let (status, headers, body) =
+            send_parts(&app, get(&format!("/join/{}", issued.token))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        assert!(body.contains("Sign in to use your invite."));
+        assert!(body.contains("next=%2Fjoin%2Fback"));
+        assert!(
+            !body.contains(&issued.token),
+            "the page must not echo the token"
+        );
+        let join_cookie = set_cookie(&headers, "lanes_join");
+        assert_eq!(join_cookie, issued.token);
+        assert!(crate::invite::list(&invites)
+            .unwrap()
+            .iter()
+            .any(|row| row.id == issued.id && row.remaining == 1));
+
+        let (cookie, csrf) = github_session(&app).await;
+        let _ = csrf;
+        let (status, headers, body) = send_parts(
+            &app,
+            Request::builder()
+                .uri("/join/back")
+                .header(
+                    "cookie",
+                    format!("lanes_session={cookie}; lanes_join={join_cookie}"),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "{body}");
+        assert_eq!(
+            headers.get(header::LOCATION).unwrap().to_str().unwrap(),
+            "/?welcome=1"
+        );
+        let saved = crate::store::Store::open(file.dir.join("chat.phext")).unwrap();
+        let member = saved.world().find_user("github:100").unwrap();
+        assert_eq!(member.name, "The Octocat");
+        assert!(member.interests.is_empty());
+        assert!(member.blurb.is_empty());
+        assert_eq!(
+            crate::invite::redeem(&invites, &issued.token, Utc::now()).unwrap_err(),
+            crate::invite::RedeemFail::Spent
+        );
+        let raw = std::fs::read_to_string(&invites).unwrap();
+        assert!(!raw.contains(&issued.token));
+
+        let (status, page) = send(
+            &app,
+            Request::builder()
+                .uri("/?welcome=1")
+                .header("cookie", format!("lanes_session={cookie}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert!(page.contains("Lanes is one quiet feed for this chat."));
+        assert!(page.contains("Signed in as"));
+        assert!(page.contains("Start a thread"));
     }
 
     async fn send_parts(

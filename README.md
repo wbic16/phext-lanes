@@ -6,6 +6,8 @@ git clone <repo-url> lanes && cd lanes && cargo run
 
 Open http://127.0.0.1:7841. You are Mira. Type a message and press Enter. The first run writes `data/chat.phext`.
 
+`cargo run -- --empty` starts a real chat instead: a General thread, and no cast. It refuses to replace a file that already has anything in it. `--seed` is the one that wipes a file, and it puts the demo cast back. Do not pass `--seed` against a chat you mean to keep.
+
 ---
 
 Predictive multi-chat, stored as one [phext](https://mirrorborn.us) file. The page is one feed: a line for each relevant thread, then a compose box. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
@@ -26,13 +28,45 @@ The name at the top switches reader. Casey's feed opens on General, and he still
 
 On the server, `deploy.sh` creates that file mode `0600` and does not print the session secret. Fill in the four client lines, then `sudo systemctl restart phext-lanes` (or run `bash deploy.sh` again).
 
+## Members
+
+When `LANES_OWNERS` is set, the default chat is invite-only and the signed-in person is the reader. There is no reader switcher. A new member's roster scroll (library 5) starts with an empty interest list, so the feed is recency. Posting or opening a thread adds that thread to the list. The same distance ranking as the demo does the rest.
+
+Leave `LANES_OWNERS` empty and the public demo stays as it is: Mira's feed, the reader switcher, open permalinks, open fork.
+
+`deploy.sh` writes `/etc/phext-lanes/owners.env` mode `0600` when that file is missing, and does not replace it later. The systemd unit loads it. One line, comma-separated, each entry a `provider:id` or an email:
+
+```text
+LANES_OWNERS=github:12345,stewart@example.com
+```
+
+GitHub's id is the numeric id, not the login. An email matches when the provider sends one. Google does. GitHub does when the address on the profile is public. Owners are members the first time they sign in. They do not need an invite.
+
+Named fabrics under `/f/<name>/` stay public to read, including their permalinks and fork. That is the incipit and demo-fabric behavior. The default fabric is the group chat: when owners are set, `/`, `/l/…`, `/p/…`, the JSON for those, and `/chat.phext` are members-only. A non-member who signs in sees a short page that asks for an invite, and does not get the text.
+
+## Invites
+
+On the server, as the account that runs Lanes:
+
+```bash
+lanes invite create --uses 1 --days 14 --file /var/lib/phext-lanes/chat.phext
+lanes invite list --file /var/lib/phext-lanes/chat.phext
+lanes invite revoke <id> --file /var/lib/phext-lanes/chat.phext
+```
+
+`create` prints the link once (`https://mc.phext.io/join/…` when `LANES_PUBLIC_ORIGIN` is set). The token is not stored. The file next to the phext, `invites.json`, keeps a hash, mode `0600`. `--uses 1` is single-use. A larger number can be used that many times. `--uses 0` does not run out. Omit `--days` and the link lasts until you revoke it.
+
+Stewart opens the link, signs in with GitHub or Google, and is a member. The next page is a short welcome. Send a fresh link if that one was single-use and already spent.
+
+To invite Stewart: put yourself in `LANES_OWNERS`, restart the service, run `lanes invite create --uses 1 --days 14` on the server, and send him the printed URL. Do not put the token in a log, a screenshot of the file, or the chat.
+
 GitHub: Settings → Developer settings → OAuth Apps → New OAuth App. Homepage `https://mc.phext.io`. Authorization callback URL `https://mc.phext.io/auth/github/callback`. Put the client id and secret in `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET`.
 
 Google: Cloud Console → APIs & Services → Credentials → Create OAuth client ID → Web application. Authorized JavaScript origin `https://mc.phext.io`. Authorized redirect URI `https://mc.phext.io/auth/google/callback`. Put them in `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`. If the consent screen is in testing, add yourself as a test user. The consent screen needs the `openid`, `email`, and `profile` scopes.
 
 ## CLI
 
-Three commands. With no command, Lanes serves the page.
+With no command, Lanes serves the page. `feed`, `post`, and `read` are the chat. `invite` manages links.
 
 ```bash
 cargo run -- feed
@@ -55,6 +89,10 @@ cargo run -- post --text "The ferns on the north wall need more shade" --preview
 cargo run -- read --scroll 1.2.1/1.1.1/1.1.2
 cargo run -- read --index
 cargo run -- --seed
+cargo run -- --empty --file data/chat.phext
+cargo run -- invite create --uses 1 --days 14
+cargo run -- invite list
+cargo run -- invite revoke <id>
 cargo run -- --host 127.0.0.1 --port 7841 --file data/chat.phext
 cargo test
 ```
@@ -168,7 +206,7 @@ The page shows that choice as `Posting to: <title> — change`. It does not show
 
 ## Tests
 
-`cargo test` covers coordinate parsing (including the semicolon form), the nine phext break codes, distance weights, the score ordering (a stale subscribed thread beats a brand-new far one), the loud-author cap, keyword prediction, a new-book suggestion, `insert` / `fetch` / `textmap` roundtrips, a scroll inserted between two existing coordinates, rejection of an injected `0x17`, and the seeded cast: Mira opens on Fern wall, Casey opens on General but still sees the quiet voices, and General is flooded while his held messages stay out of the one-line feed. It also checks that the calm feed is one line per thread plus an "N more held" note, that a thread opens by title, that reader and file defaults come from a flag, then the environment, then `lanes.json`, and that the commands are `feed`, `post`, and `read`.
+`cargo test` covers coordinate parsing (including the semicolon form), the nine phext break codes, distance weights, the score ordering (a stale subscribed thread beats a brand-new far one), the loud-author cap, keyword prediction, a new-book suggestion, `insert` / `fetch` / `textmap` roundtrips, a scroll inserted between two existing coordinates, rejection of an injected `0x17`, and the seeded cast: Mira opens on Fern wall, Casey opens on General but still sees the quiet voices, and General is flooded while his held messages stay out of the one-line feed. It also checks that the calm feed is one line per thread plus an "N more held" note, that a thread opens by title, that reader and file defaults come from a flag, then the environment, then `lanes.json`, and that the commands are `feed`, `post`, `read`, and `invite`. Invite tests cover create, redeem, expiry, revoke, and single-use. The token is not in the file. A non-member is refused the default fabric, including permalinks, while a named fabric stays readable. A sign-in profile becomes a roster scroll. `--empty` creates General and will not overwrite.
 
 ## Deploy
 
@@ -186,7 +224,9 @@ cd phext-lanes
 bash deploy.sh
 ```
 
-That builds this branch with `/snap/bin` and `~/.cargo/bin` on `PATH`, listens on `127.0.0.1:7841`, and keeps the phext in `/var/lib/phext-lanes` across redeploys. Named fabrics go in `/var/lib/phext-lanes/fabrics`. The nginx site allows uploads up to 6 MB. `LANES_ADMIN_TOKEN` is written to `/etc/phext-lanes/admin.env` (mode 0600) only when that file is missing, and the value is not printed. It writes only `/etc/nginx/sites-available/mc.phext.io`, links that file from `sites-enabled`, runs `nginx -t`, and reloads nginx. Other site files are left alone. If nginx is already failing `nginx -t`, the script stops and changes nothing. Point `mc.phext.io` at `44.248.235.76`. Certbot runs `certbot --nginx -d mc.phext.io` only when that name resolves to this machine and certbot is installed; otherwise the script prints the command. The demo cast is written only when the data file does not exist yet. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. `--user` selects the systemd account (the default is whoever runs the script). Run `bash deploy.sh` again to redeploy.
+That builds this branch with `/snap/bin` and `~/.cargo/bin` on `PATH`, listens on `127.0.0.1:7841`, and keeps the phext in `/var/lib/phext-lanes` across redeploys. Named fabrics go in `/var/lib/phext-lanes/fabrics`. The nginx site allows uploads up to 6 MB. `LANES_ADMIN_TOKEN` is written to `/etc/phext-lanes/admin.env` (mode 0600) only when that file is missing, and the value is not printed. It writes only `/etc/nginx/sites-available/mc.phext.io`, links that file from `sites-enabled`, runs `nginx -t`, and reloads nginx. Other site files are left alone. If nginx is already failing `nginx -t`, the script stops and changes nothing. Point `mc.phext.io` at `44.248.235.76`. Certbot runs `certbot --nginx -d mc.phext.io` only when that name resolves to this machine and certbot is installed; otherwise the script prints the command. The demo cast is written only when the data file does not exist yet. `bash deploy.sh --empty` on that first run writes a General thread and no cast instead, by running `lanes --empty`. If `chat.phext` already exists, `--empty` prints a warning and leaves the file alone. It never deletes a chat. To start over you move the old file aside yourself, then run `bash deploy.sh --empty` again. `--seed` is not part of deploy. Set `CERTBOT_EMAIL` for the first certificate. `--no-tls` skips certbot. `--user` selects the systemd account (the default is whoever runs the script). Run `bash deploy.sh` again to redeploy.
+
+Owners live in `/etc/phext-lanes/owners.env`. Invites land in `/var/lib/phext-lanes/invites.json` the first time you run `lanes invite create`. Neither file is in git. Fill in the OAuth client lines in `/etc/phext-lanes/oauth.env` before anyone can sign in. The steps are under Sign in, above.
 
 ## License
 

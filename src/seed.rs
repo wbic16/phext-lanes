@@ -191,6 +191,18 @@ pub fn readers() -> Vec<User> {
         .collect()
 }
 
+/// A new chat: one General thread, no readers, no messages.
+///
+/// This does not include the fictional cast. [`document`] does.
+pub fn blank() -> String {
+    let anchor = parse_coord(&format!("{HALL_THREAD}/1.1.1")).expect("general");
+    phext::insert(
+        String::new(),
+        anchor,
+        &model::format_card("General", HALL, "general"),
+    )
+}
+
 /// Build the demo phext by inserting each scroll in coordinate order.
 pub fn document(now: DateTime<Utc>) -> String {
     let mut rows: Vec<(Coordinate, String)> = Vec::new();

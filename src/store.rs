@@ -54,38 +54,28 @@ impl World {
     }
 
     pub fn find_lane(&self, id: &str) -> Option<&Thread> {
-        if let Some(coord) = crate::link::parse_section_lane_id(id) {
+        let chat = |coord: Coordinate| {
+            self.threads
+                .iter()
+                .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(coord))
+        };
+        let plain = |coord: Coordinate| {
             let key = section_key(coord);
-            if let Some(thread) = self
-                .threads
+            self.threads
                 .iter()
                 .find(|thread| thread.plain && section_key(thread.coord) == key)
-            {
-                return Some(thread);
+        };
+        // Nine parts: a chat thread's card at `…/1.1.1`, otherwise a section.
+        if let Some(coord) = crate::link::parse_section_lane_id(id) {
+            if coord.x.chapter == 1 && coord.x.section == 1 {
+                if let Some(thread) = chat(coord) {
+                    return Some(thread);
+                }
             }
-            // `…/1.1.1` on a chat thread is that thread's card.
-            if coord.x.chapter != 1 || coord.x.section != 1 {
-                return None;
-            }
-            return self
-                .threads
-                .iter()
-                .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(coord));
+            return plain(coord);
         }
         let coord = crate::link::parse_lane_id(id)?;
-        if let Some(thread) = self
-            .threads
-            .iter()
-            .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(coord))
-        {
-            return Some(thread);
-        }
-        self.threads.iter().find(|thread| {
-            thread.plain
-                && thread.coord.x.chapter == 1
-                && thread.coord.x.section == 1
-                && thread_key(thread.coord) == thread_key(coord)
-        })
+        chat(coord).or_else(|| plain(coord))
     }
 
     /// The message scroll named by a post id. The thread card is not a post.
@@ -1003,7 +993,7 @@ mod tests {
             .unwrap();
         assert!(!fern.plain);
         assert_eq!(fern.messages[0].author, "Mira Quill");
-        assert_eq!(crate::link::lane_id(fern.coord), "1.2.1/1.1.1");
+        assert_eq!(crate::link::lane_id(fern.coord), "1.2.1/1.1.1/1.1.1");
         assert_eq!(world.find_lane("1.2.1/1.1.1").unwrap().title, "Fern wall");
         assert_eq!(
             world.find_lane("1.2.1/1.1.1/1.1.1").unwrap().title,
@@ -1091,12 +1081,14 @@ mod tests {
         let links = primer
             .messages
             .iter()
-            .find(|m| m.text.starts_with("A link is just a coordinate"))
+            .find(|m| m.text.starts_with("A link is just an address"))
             .unwrap();
         assert!(links
             .text
             .contains(&format!("/p/{}", crate::link::post_id(links.coord))));
-        assert!(links.text.contains(&format!("/l/{}", seed::PRIMER_THREAD)));
+        assert!(links
+            .text
+            .contains(&format!("/l/{}", crate::link::lane_id(primer.coord))));
 
         let before = fs::read(&path).unwrap();
         drop(store);

@@ -2152,7 +2152,7 @@ mod http_tests {
         let (status, body) = send(
             &app,
             Request::builder()
-                .uri("/l/1.2.1/1.1.1")
+                .uri("/l/1.2.1/1.1.1/1.1.1")
                 .header("x-forwarded-proto", "https")
                 .header("host", "mc.phext.io")
                 .body(Body::empty())
@@ -2162,7 +2162,8 @@ mod http_tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("property=\"og:title\" content=\"Fern wall\""));
         assert!(body.contains("property=\"og:description\" content=\"The north-wall ferns"));
-        assert!(body.contains("property=\"og:url\" content=\"https://mc.phext.io/l/1.2.1/1.1.1\""));
+        assert!(body
+            .contains("property=\"og:url\" content=\"https://mc.phext.io/l/1.2.1/1.1.1/1.1.1\""));
         assert!(body.contains("id=\"text\""));
         assert!(body.contains("copylink"));
         assert!(!body.contains("%%"));
@@ -2194,8 +2195,8 @@ mod http_tests {
             "/p/nope",
             "/p/1.1.1/1.1.1/1.1.1",
             "/p/1.2.1/1.1.1",
-            "/l/9.9.9/9.9.9",
-            "/l/0.1.1/1.1.1",
+            "/l/9.9.9/9.9.9/1.1.1",
+            "/l/0.1.1/1.1.1/1.1.1",
             "/api/l/nope",
             "/api/p/kzzzz",
             "/api/p/1.2.1/1.1.1/1.1.999",
@@ -2217,11 +2218,13 @@ mod http_tests {
     async fn legacy_ids_and_semicolons_redirect_to_the_coordinate() {
         let (app, _file) = app();
         for (from, to) in [
-            ("/l/kcre66i9s", "/l/1.2.1/1.1.1"),
+            ("/l/kcre66i9s", "/l/1.2.1/1.1.1/1.1.1"),
             ("/p/k5v1j4f4ds79m9t", "/p/1.2.1/1.1.1/1.1.2"),
             ("/p/1.2.1;1.1.1;1.1.2", "/p/1.2.1/1.1.1/1.1.2"),
             ("/f/incipit/l/s0", "/f/incipit/l/1.1.1/1.1.1/1.1.1"),
-            ("/l/kcre66i9s?welcome=1", "/l/1.2.1/1.1.1?welcome=1"),
+            ("/l/kcre66i9s?welcome=1", "/l/1.2.1/1.1.1/1.1.1?welcome=1"),
+            ("/l/1.2.1/1.1.1", "/l/1.2.1/1.1.1/1.1.1"),
+            ("/l/1.2.1/1.1.1/1.1.5", "/l/1.2.1/1.1.1/1.1.1"),
         ] {
             let response = app.clone().oneshot(get(from)).await.unwrap();
             assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT, "{from}");
@@ -2229,8 +2232,8 @@ mod http_tests {
         }
         let (status, body) = send(&app, get("/api/l/kcre66i9s")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(body.contains("\"id\":\"1.2.1/1.1.1\""), "{body}");
-        for uri in ["/l/1.2.1/1.1.1", "/l/1.2.1%2F1.1.1"] {
+        assert!(body.contains("\"id\":\"1.2.1/1.1.1/1.1.1\""), "{body}");
+        for uri in ["/l/1.2.1/1.1.1/1.1.1", "/l/1.2.1%2F1.1.1%2F1.1.1"] {
             let (status, page) = send(&app, get(uri)).await;
             assert_eq!(status, StatusCode::OK, "{uri}");
             assert!(page.contains("Fern wall"), "{uri}");
@@ -2255,11 +2258,11 @@ mod http_tests {
         assert!(body.contains("http://127.0.0.1:7841/"));
         assert!(body.contains("Posting to:"));
 
-        let (status, body) = send(&app, get("/api/l/1.2.1/1.1.1")).await;
+        let (status, body) = send(&app, get("/api/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["title"], "Fern wall");
-        assert_eq!(json["id"], "1.2.1/1.1.1");
+        assert_eq!(json["id"], "1.2.1/1.1.1/1.1.1");
         assert!(json.get("highlight").is_none());
         assert!(json["messages"]
             .as_array()
@@ -2271,7 +2274,7 @@ mod http_tests {
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["highlight"], "1.2.1/1.1.1/1.1.2");
-        assert_eq!(json["id"], "1.2.1/1.1.1");
+        assert_eq!(json["id"], "1.2.1/1.1.1/1.1.1");
         let marked = json["messages"]
             .as_array()
             .unwrap()
@@ -2306,7 +2309,7 @@ mod http_tests {
         let id = posted["id"].as_str().unwrap().to_string();
         let lane = posted["lane"].as_str().unwrap().to_string();
         assert_ne!(id, lane);
-        assert_eq!(lane, "1.2.1/1.1.2");
+        assert_eq!(lane, "1.2.1/1.1.2/1.1.1");
         assert_eq!(id, "1.2.1/1.1.2/1.1.2");
 
         let (status, page) = send(&app, get(&format!("/p/{id}"))).await;
@@ -2400,7 +2403,7 @@ mod http_tests {
         assert!(page.contains("data-fabric=\"notes\""));
         assert!(page.contains("href=\"/f/notes/chat.phext\""));
         assert!(page.contains("https://mirrorborn.us"));
-        let (status, home) = send(&app, get("/l/1.2.1/1.1.1")).await;
+        let (status, home) = send(&app, get("/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(home.contains("data-fabric=\"\""));
         assert!(home.contains("href=\"/chat.phext\""));
@@ -2502,7 +2505,7 @@ mod http_tests {
             .find(|thread| thread["title"] == "Fern wall")
             .unwrap();
         assert_eq!(fern["plain"], false);
-        assert_eq!(fern["id"], "1.2.1/1.1.1");
+        assert_eq!(fern["id"], "1.2.1/1.1.1/1.1.1");
         assert_eq!(fern["messages"][0]["author"], "Mira Quill");
         let incipit = json["feed"]
             .as_array()
@@ -2543,11 +2546,11 @@ mod http_tests {
         assert!(fork.contains("TTSM"));
         assert!(!fork.contains("Another chapter."));
 
-        let (status, body) = send(&app, get("/f/incipit/api/l/1.2.1/1.1.1")).await;
+        let (status, body) = send(&app, get("/f/incipit/api/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let fern_room: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(fern_room["plain"], false);
-        assert_eq!(fern_room["id"], "1.2.1/1.1.1");
+        assert_eq!(fern_room["id"], "1.2.1/1.1.1/1.1.1");
         assert_eq!(fern_room["messages"][0]["author"], "Mira Quill");
     }
 
@@ -2680,7 +2683,7 @@ mod http_tests {
     #[tokio::test]
     async fn reading_and_fork_stay_open_without_a_session() {
         let (app, _file) = app();
-        let (status, body) = send(&app, get("/l/1.2.1/1.1.1")).await;
+        let (status, body) = send(&app, get("/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Fern wall"));
         let (status, _headers, fork) = send_parts(&app, get("/chat.phext")).await;
@@ -2731,7 +2734,7 @@ mod http_tests {
     async fn github_sign_in_sets_a_session_and_the_poster_identity() {
         let (app, file) = app();
         let (status, headers, _body) =
-            send_parts(&app, get("/auth/github?next=/l/1.2.1/1.1.1")).await;
+            send_parts(&app, get("/auth/github?next=/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::FOUND);
         let location = headers.get(header::LOCATION).unwrap().to_str().unwrap();
         assert!(location.starts_with("https://github.com/login/oauth/authorize?"));
@@ -2764,7 +2767,7 @@ mod http_tests {
         assert_eq!(status, StatusCode::FOUND, "{body}");
         assert_eq!(
             headers.get(header::LOCATION).unwrap().to_str().unwrap(),
-            "/l/1.2.1/1.1.1"
+            "/l/1.2.1/1.1.1/1.1.1"
         );
         let session = set_cookie(&headers, "lanes_session");
         assert!(!session.is_empty());
@@ -2961,7 +2964,7 @@ mod http_tests {
             &crate::oauth::Oauth::test_session_cookie(),
             crate::oauth::TEST_CSRF,
         );
-        for uri in ["/", "/l/1.2.1/1.1.1", "/p/1.2.1/1.1.1/1.1.2"] {
+        for uri in ["/", "/l/1.2.1/1.1.1/1.1.1", "/p/1.2.1/1.1.1/1.1.2"] {
             let (status, body) = send(
                 &app,
                 Request::builder()
@@ -2982,7 +2985,7 @@ mod http_tests {
         let (status, body) = send(
             &app,
             Request::builder()
-                .uri("/api/l/1.2.1/1.1.1")
+                .uri("/api/l/1.2.1/1.1.1/1.1.1")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -3056,7 +3059,7 @@ mod http_tests {
         let (status, page) = send(
             &app,
             Request::builder()
-                .uri("/l/1.2.1/1.1.1")
+                .uri("/l/1.2.1/1.1.1/1.1.1")
                 .header("cookie", format!("lanes_session={cookie}"))
                 .body(Body::empty())
                 .unwrap(),

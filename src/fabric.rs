@@ -574,10 +574,10 @@ mod tests {
     #[test]
     fn routes_keep_the_default_permalinks_and_add_a_fabric_prefix() {
         assert_eq!(
-            parse_route("/l/1.2.1/1.1.1").unwrap(),
+            parse_route("/l/1.2.1/1.1.1/1.1.1").unwrap(),
             ParsedRoute {
                 fabric: None,
-                route: Route::Lane("1.2.1/1.1.1".into()),
+                route: Route::Lane("1.2.1/1.1.1/1.1.1".into()),
             }
         );
         assert_eq!(
@@ -588,10 +588,10 @@ mod tests {
             }
         );
         assert_eq!(
-            parse_route("/f/notes/l/1.2.1/1.1.1").unwrap(),
+            parse_route("/f/notes/l/1.2.1/1.1.1/1.1.1").unwrap(),
             ParsedRoute {
                 fabric: Some("notes".into()),
-                route: Route::Lane("1.2.1/1.1.1".into()),
+                route: Route::Lane("1.2.1/1.1.1/1.1.1".into()),
             }
         );
         assert_eq!(
@@ -637,7 +637,7 @@ mod tests {
         let lane = lane_document(&doc, fern);
         assert!(lane.contains("north-wall ferns"));
         assert!(!lane.contains("starter is slow"));
-        assert_eq!(lane_id(fern.coord), "1.2.1/1.1.1");
+        assert_eq!(lane_id(fern.coord), "1.2.1/1.1.1/1.1.1");
         let opening = fern
             .messages
             .iter()

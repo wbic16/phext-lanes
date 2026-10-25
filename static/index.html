@@ -20,6 +20,7 @@
     --line: #e6e0d6;
     --preview: #4a453f;
     --mark: #efe6d4;
+    --band: #ece8df;
     --dock: rgba(244, 241, 234, 0.94);
     --danger: #8a3a2a;
   }
@@ -33,6 +34,7 @@
       --line: #3a342c;
       --preview: #c9bfb2;
       --mark: #2a261f;
+      --band: #1e1b17;
       --dock: rgba(22, 20, 17, 0.94);
       --danger: #e0a090;
     }
@@ -138,14 +140,20 @@
     font-size: 0.82rem;
   }
   .reading { padding: 0.25rem 0 0.5rem; }
-  .msg { margin: 1.35rem 0 1.5rem; }
-  .msg.mark {
-    background: var(--mark);
+  .msg {
     border-radius: 2px;
-    margin-left: -0.55rem;
-    margin-right: -0.55rem;
-    padding: 0.45rem 0.55rem 0.55rem;
+    margin: 0 -0.55rem;
+    padding: 0.7rem 0.55rem 0.8rem;
   }
+  .msg:first-of-type { margin-top: 0.65rem; }
+  .msg:nth-of-type(even) { background: var(--band); }
+  .msg.mark { background: var(--mark); }
+  .msg p a {
+    color: inherit;
+    text-decoration-color: var(--faint);
+    text-underline-offset: 0.15em;
+  }
+  .msg p a:hover, .msg p a:focus-visible { text-decoration-color: var(--ink); }
   .by { margin: 0 0 0.2rem; color: var(--muted); font-size: 0.88rem; }
   .msg p { margin: 0; white-space: pre-wrap; }
   .held {
@@ -640,16 +648,17 @@ function routeFromPath() {
   return { kind: match[1], id: decodeURIComponent(match[2]) };
 }
 
-// A thread (1.1.1/1.1.2) or a scroll (1.1.1/1.1.2/1.1.3), with an optional
-// /l/ or /p/ in front. Semicolons count as slashes.
-const COORD_LINK = /(\/[lp]\/)?(?<![\d.])(\d{1,4}\.\d{1,4}\.\d{1,4}[\/;]\d{1,4}\.\d{1,4}\.\d{1,4}(?:[\/;]\d{1,4}\.\d{1,4}\.\d{1,4})?)(?!\d|\.\d)/g;
+// A nine-part phext address (1.1.1/1.1.2/1.1.3), with an optional /l/ or
+// /p/ in front. Semicolons count as slashes. Without a prefix, a thread card
+// (…/1.1.1) opens the thread and any other scroll opens that post.
+const COORD_LINK = /(\/[lp]\/)?(?<![\d.])(\d{1,4}\.\d{1,4}\.\d{1,4}[\/;]\d{1,4}\.\d{1,4}\.\d{1,4}[\/;]\d{1,4}\.\d{1,4}\.\d{1,4})(?!\d|\.\d|[\/;]\d)/g;
 
 function linkedText(tag, text) {
   const node = el(tag);
   let last = 0;
   for (const match of text.matchAll(COORD_LINK)) {
     const coord = match[2].replace(/;/g, "/");
-    const kind = match[1] ? match[1][1] : (coord.split("/").length === 3 ? "p" : "l");
+    const kind = match[1] ? match[1][1] : (coord.endsWith("/1.1.1") ? "l" : "p");
     node.append(text.slice(last, match.index));
     const path = "/" + kind + "/" + coord;
     node.append(el("a", {

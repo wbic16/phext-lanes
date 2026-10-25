@@ -193,6 +193,30 @@
     font-size: 0.9rem;
   }
   .extra p { margin: 0.35rem 0; }
+  .limits { margin: 1.25rem 0 1.5rem; }
+  .limits h2 { margin: 0 0 0.5rem; font-size: 0.95rem; font-weight: 600; color: var(--ink); }
+  .limits .note { color: var(--faint); }
+  .limits-form label {
+    display: flex;
+    gap: 1rem;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 0.3rem 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .limits-form input {
+    width: 5.5rem;
+    flex: none;
+    font: inherit;
+    color: var(--ink);
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid var(--faint);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .limits-form input::placeholder { color: var(--faint); }
+  .limits-actions { display: flex; gap: 1.25rem; margin-top: 0.75rem; }
   .texty {
     background: transparent;
     border: 0;
@@ -332,6 +356,7 @@ const state = {
   tocText: "",
   session: null,
   fresh: false,
+  limitsPanel: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -952,6 +977,90 @@ async function loadMorePosts() {
   await loadLane(room.id, offset);
 }
 
+const LIMIT_FIELDS = [
+  { key: "loud_at", label: "Posts before an author is filtered", step: "1" },
+  { key: "author_cap", label: "Lines a filtered author keeps in other feeds", step: "1" },
+  { key: "max_threads", label: "Active threads in the feed", step: "1" },
+  { key: "page_size", label: "Messages per page in a thread", step: "1" },
+  { key: "flood_min_messages", label: "Messages before a thread can flood", step: "1" },
+  { key: "flood_share", label: "One author's share that floods a thread (0 to 1)", step: "0.05" },
+];
+
+// Built once per lane and set of values, so a re-render keeps what is typed.
+function limitsPanel(data) {
+  const limits = data.limits;
+  const key = (data.fabric || "") + ":" + JSON.stringify(limits);
+  if (state.limitsPanel && state.limitsPanel.key === key) return state.limitsPanel.node;
+  const node = el("section", { class: "limits", "aria-label": "Limits" });
+  node.append(el("h2", { text: "Limits" }));
+  if (!limits.editable) {
+    for (const field of LIMIT_FIELDS) {
+      node.append(el("p", { text: field.label + ": " + limits.values[field.key] }));
+    }
+    node.append(el("p", { class: "note", text: "An owner of this lane can change these." }));
+  } else {
+    const form = el("form", { class: "limits-form" });
+    const inputs = {};
+    for (const field of LIMIT_FIELDS) {
+      const own = limits.overrides[field.key];
+      const input = el("input", {
+        type: "number",
+        name: field.key,
+        min: field.key === "flood_share" ? "0" : "1",
+        max: field.key === "flood_share" ? "1" : null,
+        step: field.step,
+        inputmode: field.step === "1" ? "numeric" : "decimal",
+        placeholder: String(limits.defaults[field.key]),
+        value: own === null || own === undefined ? "" : String(own),
+      });
+      inputs[field.key] = input;
+      form.append(el("label", {}, [el("span", { text: field.label }), input]));
+    }
+    const status = el("p", { class: "note", text: "Blank uses the server's value, shown faintly." });
+    const save = el("button", { type: "submit", class: "texty", text: "Save limits" });
+    const clear = el("button", { type: "button", class: "texty", text: "Use server values" });
+    form.append(el("p", { class: "limits-actions" }, [save, clear]), status);
+    const send = async (body) => {
+      status.textContent = "Saving…";
+      const res = await fetch(api("/api/limits"), {
+        method: "POST",
+        headers: writeHeaders({ "content-type": "application/json" }),
+        body: JSON.stringify(body),
+      });
+      const reply = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        status.textContent = reply.error || "Could not save the limits.";
+        return;
+      }
+      state.limitsPanel = null;
+      await loadState();
+      render();
+      setStatus("Limits saved.", false);
+    };
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const body = {};
+      for (const field of LIMIT_FIELDS) {
+        const raw = inputs[field.key].value.trim();
+        if (raw === "") continue;
+        const value = Number(raw);
+        if (!Number.isFinite(value)) {
+          status.textContent = field.label + " needs a number.";
+          return;
+        }
+        body[field.key] = value;
+      }
+      send(body).catch((err) => { status.textContent = err.message; });
+    });
+    clear.addEventListener("click", () => {
+      send({}).catch((err) => { status.textContent = err.message; });
+    });
+    node.append(form);
+  }
+  state.limitsPanel = { key, node };
+  return node;
+}
+
 function renderExtra() {
   const host = $("extra");
   const on = document.body.classList.contains("details");
@@ -960,7 +1069,7 @@ function renderExtra() {
   if (!on || !state.data) return;
   const data = state.data;
   host.append(el("p", { text: data.file }));
-  host.append(el("p", { text: "An author with " + data.loud_at + " or more messages is kept to " + data.cap + " lines." }));
+  host.append(limitsPanel(data));
   for (const lane of data.lanes) {
     host.append(el("p", { text: lane.author + " · " + lane.held + " held, " + lane.shown + " shown" }));
   }

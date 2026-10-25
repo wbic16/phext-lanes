@@ -69,7 +69,7 @@ fn calm_line(thread: &FeedThread) -> String {
     }
 }
 
-pub fn format_thread(thread: &Thread, details: bool) -> String {
+pub fn format_thread(thread: &Thread, details: bool, limits: &rank::Limits) -> String {
     let mut out = String::new();
     if details {
         out.push_str(&format!("{}  {}\n", thread.topic, thread_key(thread.coord)));
@@ -84,7 +84,7 @@ pub fn format_thread(thread: &Thread, details: bool) -> String {
                 thread.messages.len(),
                 share * 100.0
             ));
-            if rank::is_flooded(thread.messages.len(), share) {
+            if limits.is_flooded(thread.messages.len(), share) {
                 out.push_str("flooded\n");
             }
             out.push('\n');
@@ -202,8 +202,7 @@ mod tests {
             &world.threads,
             &mira.interests,
             moment,
-            rank::AUTHOR_CAP,
-            rank::MAX_THREADS,
+            &rank::Limits::default(),
         );
         let text = format_feed(&feed, false);
         let body: Vec<_> = text
@@ -231,12 +230,12 @@ mod tests {
         let moment = crate::seed::demo_instant();
         let world = crate::store::world_from(&crate::seed::document(moment));
         let fern = world.find_thread("Fern wall").unwrap();
-        let plain = format_thread(fern, false);
+        let plain = format_thread(fern, false, &rank::Limits::default());
         assert!(plain.starts_with("Fern wall\n"));
         assert!(plain.contains("Mira Quill"));
         assert!(!plain.contains("1.2.1"));
         assert!(!plain.contains("flooded"));
-        let detailed = format_thread(fern, true);
+        let detailed = format_thread(fern, true, &rank::Limits::default());
         assert!(detailed.contains("1.2.1/1.1.1"));
         assert!(detailed.contains("Gardens"));
     }

@@ -153,7 +153,10 @@ async fn run() -> Result<(), Error> {
         }
     }
     match cli.command {
-        None => lanes::server::serve(settings.file, &listen.host, listen.port).await,
+        None => {
+            let limits = lanes::config::load_limits()?;
+            lanes::server::serve(settings.file, &listen.host, listen.port, limits).await
+        }
         Some(Command::Feed) => {
             let store = Store::open(&settings.file)?;
             print_feed(&store, &settings, cli.details)?;
@@ -285,7 +288,15 @@ fn require_user<'a>(world: &'a World, query: &str) -> Result<&'a lanes::model::U
     })
 }
 
+/// The server's limits from the environment and `lanes.json`, with this
+/// phext's own overrides on top.
+fn limits_for(store: &Store) -> Result<lanes::config::Limits, Error> {
+    let base = lanes::config::load_limits()?;
+    Ok(store.world().settings.limits.apply(base))
+}
+
 fn print_feed(store: &Store, settings: &Settings, details: bool) -> Result<(), Error> {
+    let limits = limits_for(store)?;
     let world = store.world();
     let interests;
     let interest_ref: &[libphext::phext::Coordinate] = if world.users.is_empty() {
@@ -294,13 +305,7 @@ fn print_feed(store: &Store, settings: &Settings, details: bool) -> Result<(), E
         interests = require_user(world, &settings.user)?.interests.clone();
         &interests
     };
-    let feed = rank::build_feed(
-        &world.threads,
-        interest_ref,
-        Utc::now(),
-        rank::AUTHOR_CAP,
-        rank::MAX_THREADS,
-    );
+    let feed = rank::build_feed(&world.threads, interest_ref, Utc::now(), &limits);
     if feed.threads.is_empty() {
         print_quiet(world);
         return Ok(());
@@ -428,18 +433,13 @@ fn read(
         }
         return Ok(());
     }
+    let limits = limits_for(store)?;
     let world = store.world();
     let thread = if let Some(query) = query {
         world.find_thread(query).map_err(Error::from)?
     } else {
         let user = require_user(world, &settings.user)?;
-        let feed = rank::build_feed(
-            &world.threads,
-            &user.interests,
-            Utc::now(),
-            rank::AUTHOR_CAP,
-            rank::MAX_THREADS,
-        );
+        let feed = rank::build_feed(&world.threads, &user.interests, Utc::now(), &limits);
         let top = feed
             .threads
             .first()
@@ -448,7 +448,7 @@ fn read(
             .thread(&thread_key(top.coord))
             .ok_or_else(|| Error::Bad("nothing to read".into()))?
     };
-    let text = calm::format_thread(thread, details);
+    let text = calm::format_thread(thread, details, &limits);
     if text.is_empty() {
         println!("Nothing to read.");
     } else {

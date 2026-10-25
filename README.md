@@ -48,6 +48,30 @@ GitHub's id is the numeric id, not the login. An email matches when the provider
 
 Named fabrics under `/f/<name>/` stay public to read, including their permalinks and fork. That is the incipit and demo-fabric behavior. The default fabric is the group chat: when owners are set, `/`, `/l/…`, `/p/…`, the JSON for those, and `/chat.phext` are members-only. A non-member who signs in sees a short page that asks for an invite, and does not get the text.
 
+## Limits
+
+How much the feed shows, and how fast people may write, are settings rather than constants.
+
+| Limit | Env | Default | Who can change it |
+|---|---|---|---|
+| Posts before an author is filtered | `LANES_LOUD_AT` | 8 | server, lane owner |
+| Lines a filtered author keeps in other feeds | `LANES_AUTHOR_CAP` | 2 | server, lane owner |
+| Active (ranked) threads in the feed | `LANES_MAX_THREADS` | 8 | server, lane owner |
+| Messages per page in a thread | `LANES_PAGE_SIZE` | 40 | server, lane owner |
+| Messages before a thread can flood | `LANES_FLOOD_MIN_MESSAGES` | 10 | server, lane owner |
+| One author's share that floods a thread | `LANES_FLOOD_SHARE` | 0.7 | server, lane owner |
+| Sign-in attempts per address, per 10 min | `LANES_AUTH_PER_IP` | 20 | server |
+| Writes per address, per 10 min | `LANES_WRITES_PER_IP` | 40 | server |
+| Writes per account, per 10 min | `LANES_WRITES_PER_ACCOUNT` | 30 | server |
+
+The server's values come from the environment, then `"limits"` in `lanes.json` (`{"limits": {"max_threads": 20}}`), then the defaults above. An out-of-range or misspelled limit stops the server with a message that names it. On the server, `deploy.sh` writes `/etc/phext-lanes/limits.env` with every line commented out, and the service loads it.
+
+A lane's owner can change the feed limits in the browser: open **details**, edit the **Limits** fields, and **Save limits**. A blank field uses the server's value, shown faintly. **Use server values** clears them all. The overrides live in the lane's own phext, in a settings scroll at `5.1.1/1.1.2/1.1.1` in the roster library, so a fork keeps them. Rate limits protect the whole server and stay with the operator.
+
+The owners of a lane are everyone in `LANES_OWNERS`, plus the people named in its settings scroll. Creating a fabric in the browser names you there. A fabric made before that has no named owner, so only `LANES_OWNERS` can change it.
+
+`POST /api/limits` (or `/f/<name>/api/limits`) takes `{"max_threads": 12, ...}` from a signed-in owner and replaces the lane's overrides; `{}` clears them. `GET /api/state` returns `limits` with `values`, `defaults`, `overrides`, and `editable`.
+
 ## Invites
 
 On the server, as the account that runs Lanes:
@@ -198,7 +222,7 @@ Nearness, shown only under details: 0 subscribed, 1–3 next door, 4–12 same w
 
 ### The lane
 
-An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in another reader's feed, wherever those lines would have ranked. Your own posts are never held back in your own feed. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
+An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in another reader's feed, wherever those lines would have ranked. Your own posts are never held back in your own feed. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Both numbers are the defaults; see [Limits](#limits). Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
 
 General is marked flooded, under details, when one author wrote at least 70% of a room of 10 or more messages. Casey is 12 of 15 there. Fern wall is half Casey and is not marked; the cap still holds him to two lines.
 

@@ -13,6 +13,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AdminTokenCheck, PlotHolderCheck};
+use crate::config::{LimitOverrides, Limits};
 use crate::coord::{
     format_coord, parse_coord, parse_target, section_key, thread_key, topic_key, Target,
 };
@@ -21,14 +22,13 @@ use crate::fabric::{self, day_stamp, download_filename, FabricError, ParsedRoute
 use crate::invite::{self, Owners};
 use crate::limit::{Bucket, Limiter};
 use crate::link::{lane_id, post_id, section_lane_id};
-use crate::model::{self, preview, Message};
+use crate::model::{self, preview, LaneSettings, Message};
 use crate::oauth::{self, Oauth};
 use crate::rank::{self, Feed, MapEntry};
 use crate::store::{Post, Store};
 
 const INDEX: &str = include_str!("../static/index.html");
 const BODY_LIMIT: usize = fabric::MAX_FABRIC_BYTES;
-const PAGE: usize = 40;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -38,20 +38,24 @@ pub struct AppState {
     limits: Arc<Limiter>,
     owners: Arc<Owners>,
     invites: std::path::PathBuf,
+    /// Server-wide limits. A lane's settings scroll can override the feed ones.
+    defaults: Limits,
 }
 
 impl AppState {
-    pub fn open(path: std::path::PathBuf) -> Result<Self, Error> {
+    pub fn open(path: std::path::PathBuf, limits: Limits) -> Result<Self, Error> {
         let invites = invite::resolve(&path);
         let owners = Arc::new(Owners::from_env());
-        Self::assemble(
+        let mut state = Self::assemble(
             path,
             Arc::new(AdminTokenCheck::from_env()),
             Arc::new(Oauth::from_env()),
-            Arc::new(Limiter::standard()),
+            Arc::new(Limiter::from_limits(&limits)),
             owners,
             invites,
-        )
+        )?;
+        state.defaults = limits;
+        Ok(state)
     }
 
     pub fn with_auth(
@@ -101,6 +105,20 @@ impl AppState {
             limits,
             owners,
             invites,
+            defaults: Limits::default(),
+        })
+    }
+
+    /// The limits a lane runs with: its overrides over the server's.
+    fn limits_for(&self, store: &Store) -> Limits {
+        store.world().settings.limits.apply(self.defaults)
+    }
+
+    /// Server owners (`LANES_OWNERS`) own every lane. A lane's settings
+    /// scroll names its own owners, starting with whoever created it.
+    fn owns(&self, session: Option<&oauth::Session>, settings: &LaneSettings) -> bool {
+        session.is_some_and(|session| {
+            self.owners.matches(&session.who, &session.email) || settings.is_owner(&session.who)
         })
     }
 }
@@ -114,12 +132,17 @@ pub fn listen_addr(host: &str, port: u16) -> String {
     }
 }
 
-pub async fn serve(path: std::path::PathBuf, host: &str, port: u16) -> Result<(), Error> {
+pub async fn serve(
+    path: std::path::PathBuf,
+    host: &str,
+    port: u16,
+    limits: Limits,
+) -> Result<(), Error> {
     let host = host.trim();
     if host.is_empty() {
         return Err(Error::Bad("listen host is empty".into()));
     }
-    let state = AppState::open(path)?;
+    let state = AppState::open(path, limits)?;
     let label = state
         .hub
         .with_store(None, |store| store.path().display().to_string())
@@ -283,6 +306,7 @@ fn handle(
         }
         Route::PostMessage => Ok(Json(post_message(app, fabric, headers, body)?).into_response()),
         Route::Reset => Ok(Json(reset(app, fabric, headers)?).into_response()),
+        Route::Limits => Ok(Json(save_limits(app, fabric, headers, body)?).into_response()),
         Route::Session => Ok(session_view(app, headers)),
         Route::AuthStart(provider) => auth_start(
             app,
@@ -428,9 +452,52 @@ fn state_of(
         fork: format!("{}/chat.phext", public_prefix(fabric)),
         demo: fabric.is_none() && !app.owners.invite_only(),
         invite_only: app.owners.invite_only() && fabric.is_none(),
+        defaults: app.defaults,
     };
-    app.hub
-        .with_store(fabric, |store| snapshot(store, user, session, &meta))?
+    app.hub.with_store(fabric, |store| {
+        let owner = app.owns(session, &store.world().settings);
+        snapshot(store, user, session, &meta, owner)
+    })?
+}
+
+/// Replace this lane's limit overrides. Omitted or null fields fall back to
+/// the server's limits. Only an owner of the lane may do this.
+fn save_limits(
+    app: &AppState,
+    fabric: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<LimitsDto, AppError> {
+    let session = guard_write(app, headers)?;
+    let overrides: LimitOverrides =
+        serde_json::from_slice(body).map_err(|err| AppError::bad(format!("limits: {err}")))?;
+    overrides
+        .apply(app.defaults)
+        .check()
+        .map_err(|(key, range, value)| {
+            AppError::bad(format!("{key} must be {range}, got {value}"))
+        })?;
+    app.hub.with_store(fabric, |store| {
+        let mut settings = store.world().settings.clone();
+        if !app.owns(Some(&session), &settings) {
+            return Err(AppError::status(
+                StatusCode::FORBIDDEN,
+                "Only an owner of this lane can change its limits.",
+            ));
+        }
+        settings.limits = overrides;
+        store.save_settings(&settings)?;
+        Ok(limits_dto(app.defaults, &settings, true))
+    })?
+}
+
+fn limits_dto(defaults: Limits, settings: &LaneSettings, editable: bool) -> LimitsDto {
+    LimitsDto {
+        values: settings.limits.apply(defaults),
+        defaults,
+        overrides: settings.limits,
+        editable,
+    }
 }
 
 fn open_lane(
@@ -441,13 +508,14 @@ fn open_lane(
     actor: Option<&str>,
 ) -> Result<OpenDto, AppError> {
     app.hub.with_store(fabric, |store| {
+        let limits = app.limits_for(store);
         let (dto, plain, coord) = {
             let world = store.world();
             let thread = world.find_lane(id).ok_or_else(AppError::missing)?;
             (
                 OpenDto {
                     highlight: None,
-                    room: room_dto(thread, offset),
+                    room: room_dto(thread, offset, &limits),
                 },
                 thread.plain,
                 thread.coord,
@@ -464,6 +532,8 @@ fn open_lane(
 
 fn open_post(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, AppError> {
     app.hub.with_store(fabric, |store| {
+        let limits = app.limits_for(store);
+        let page = limits.page_size;
         let world = store.world();
         let (thread, message) = world.find_post(id).ok_or_else(AppError::missing)?;
         let index = thread
@@ -473,7 +543,7 @@ fn open_post(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, 
             .unwrap_or(0);
         Ok(OpenDto {
             highlight: Some(post_id(message.coord)),
-            room: room_dto(thread, (index / PAGE) * PAGE),
+            room: room_dto(thread, (index / page) * page, &limits),
         })
     })?
 }
@@ -481,11 +551,12 @@ fn open_post(app: &AppState, fabric: Option<&str>, id: &str) -> Result<OpenDto, 
 fn room(app: &AppState, fabric: Option<&str>, thread: &str) -> Result<RoomDto, AppError> {
     let key = thread_key_from(thread)?;
     app.hub.with_store(fabric, |store| {
+        let limits = app.limits_for(store);
         let world = store.world();
         let thread = world
             .thread(&key)
             .ok_or_else(|| AppError::bad(format!("no thread at {key}")))?;
-        Ok(room_dto(thread, 0))
+        Ok(room_dto(thread, 0, &limits))
     })?
 }
 
@@ -679,7 +750,7 @@ fn create_named(
     if fabric.is_some() {
         return Err(AppError::bad("create a fabric from the server root"));
     }
-    let _session = guard_write(app, headers)?;
+    let session = guard_write(app, headers)?;
     if !app.auth.plot_holder_check(&bearer(headers)) {
         return Err(AppError::forbidden());
     }
@@ -688,6 +759,13 @@ fn create_named(
         Some(bytes) => app.hub.create_upload(requested, bytes, &ip)?,
         None => app.hub.create_empty(requested, &ip)?,
     };
+    app.hub.with_store(Some(&name), |store| {
+        let mut settings = store.world().settings.clone();
+        if !settings.is_owner(&session.who) {
+            settings.owners.push(session.who.clone());
+        }
+        store.save_settings(&settings)
+    })??;
     Ok(serde_json::json!({"ok": true, "name": name}))
 }
 
@@ -695,7 +773,12 @@ impl Route {
     fn is_post(&self) -> bool {
         matches!(
             self,
-            Route::PostMessage | Route::Reset | Route::Create | Route::Upload | Route::Logout
+            Route::PostMessage
+                | Route::Reset
+                | Route::Limits
+                | Route::Create
+                | Route::Upload
+                | Route::Logout
         )
     }
 
@@ -1358,6 +1441,7 @@ struct FabricView {
     fork: String,
     demo: bool,
     invite_only: bool,
+    defaults: Limits,
 }
 
 fn snapshot(
@@ -1365,8 +1449,10 @@ fn snapshot(
     user_query: Option<&str>,
     session: Option<&oauth::Session>,
     meta: &FabricView,
+    owner: bool,
 ) -> Result<StateDto, AppError> {
     let world = store.world();
+    let limits = world.settings.limits.apply(meta.defaults);
     let (viewer, interests, reader) = if let Some(session) = session {
         if let Some(user) = world.find_user(&session.who) {
             let interests = user.interests.clone();
@@ -1410,15 +1496,8 @@ fn snapshot(
         .filter(|thread| !thread.plain)
         .cloned()
         .collect();
-    let feed = rank::build_feed_for(
-        &chat,
-        &interests,
-        now,
-        rank::AUTHOR_CAP,
-        rank::MAX_THREADS,
-        reader.as_deref(),
-    );
-    let map = rank::map_of(&chat, &interests);
+    let feed = rank::build_feed_for(&chat, &interests, now, &limits, reader.as_deref());
+    let map = rank::map_of(&chat, &interests, &limits);
     let mut feed_rows = feed_dto(&feed);
     for thread in world.threads.iter().filter(|thread| !thread.plain) {
         if feed_rows
@@ -1439,8 +1518,9 @@ fn snapshot(
         fork: meta.fork.clone(),
         demo: meta.demo,
         invite_only: meta.invite_only,
-        cap: rank::AUTHOR_CAP,
-        loud_at: rank::LOUD_AT,
+        cap: limits.author_cap,
+        loud_at: limits.loud_at,
+        limits: limits_dto(meta.defaults, &world.settings, owner),
         viewer,
         users: world
             .users
@@ -1606,12 +1686,12 @@ fn map_dto(entry: MapEntry) -> MapDto {
     }
 }
 
-fn room_dto(thread: &crate::model::Thread, offset: usize) -> RoomDto {
+fn room_dto(thread: &crate::model::Thread, offset: usize, limits: &Limits) -> RoomDto {
     let total = thread.messages.len();
     let (start, end) = if offset >= total {
         (total, total)
     } else {
-        (offset, (offset + PAGE).min(total))
+        (offset, (offset + limits.page_size).min(total))
     };
     let page = &thread.messages[start..end];
     let (majority_author, majority_count, majority_share) = rank::majority(&thread.messages);
@@ -1637,7 +1717,7 @@ fn room_dto(thread: &crate::model::Thread, offset: usize) -> RoomDto {
         majority_author,
         majority_count,
         majority_share,
-        flooded: rank::is_flooded(thread.messages.len(), majority_share),
+        flooded: limits.is_flooded(thread.messages.len(), majority_share),
     }
 }
 
@@ -1737,11 +1817,24 @@ struct StateDto {
     invite_only: bool,
     cap: usize,
     loud_at: usize,
+    limits: LimitsDto,
     viewer: ViewerDto,
     users: Vec<UserDto>,
     feed: Vec<FeedThreadDto>,
     lanes: Vec<LaneDto>,
     map: Vec<MapDto>,
+}
+
+#[derive(Serialize)]
+struct LimitsDto {
+    /// What this lane runs with.
+    values: Limits,
+    /// The server's limits, used where the lane sets nothing.
+    defaults: Limits,
+    /// What this lane sets. Null means the server's value.
+    overrides: LimitOverrides,
+    /// The viewer owns this lane and may change its limits.
+    editable: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -2398,6 +2491,134 @@ mod http_tests {
         assert_eq!(status, StatusCode::OK);
         assert!(lane.contains("north-wall ferns"));
         assert!(!lane.contains("starter is slow"));
+    }
+
+    fn post_limits(uri: &str, json: &str, signed_in: bool) -> Request<Body> {
+        let builder = Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json");
+        let builder = if signed_in {
+            with_session(builder)
+        } else {
+            builder
+        };
+        builder.body(Body::from(json.to_string())).unwrap()
+    }
+
+    fn signed_get(uri: &str) -> Request<Body> {
+        with_session(Request::builder().uri(uri))
+            .body(Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_lane_creator_owns_its_limits_and_others_cannot_change_them() {
+        let (app, _file) = app();
+        let (status, body) = send(&app, bearer("plot-secret")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let (_, body) = send(&app, signed_get("/f/notes/api/state")).await;
+        let state: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(state["limits"]["editable"], true, "{body}");
+        assert_eq!(state["limits"]["values"]["max_threads"], 8);
+        assert!(state["limits"]["overrides"]["max_threads"].is_null());
+        let (_, body) = send(&app, get("/f/notes/api/state")).await;
+        let state: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(state["limits"]["editable"], false);
+
+        let (status, body) = send(
+            &app,
+            post_limits(
+                "/f/notes/api/limits",
+                r#"{"max_threads":2,"loud_at":3}"#,
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let saved: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(saved["values"]["max_threads"], 2);
+        assert_eq!(saved["values"]["loud_at"], 3);
+        assert_eq!(saved["values"]["author_cap"], 2);
+        assert_eq!(saved["defaults"]["max_threads"], 8);
+
+        let (status, body) = send(
+            &app,
+            post_limits("/f/notes/api/limits", r#"{"author_cap":0}"#, true),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.contains("author_cap"), "{body}");
+        let (status, body) = send(
+            &app,
+            post_limits("/f/notes/api/limits", r#"{"writes_per_ip":1}"#, true),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "rate limits are not per lane: {body}"
+        );
+
+        let (status, _) = send(
+            &app,
+            post_limits("/f/notes/api/limits", r#"{"max_threads":5}"#, false),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = send(
+            &app,
+            post_limits("/api/limits", r#"{"max_threads":5}"#, true),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "not an owner of the default lane: {body}"
+        );
+
+        let (_, body) = send(&app, get("/f/notes/api/state")).await;
+        let state: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(state["limits"]["values"]["max_threads"], 2, "{body}");
+
+        let (status, body) = send(&app, post_limits("/f/notes/api/limits", "{}", true)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let reset: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            reset["values"]["max_threads"], 8,
+            "an empty body clears overrides"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_server_owner_can_limit_the_default_lane_feed() {
+        let (app, _file) = app_private("github:100");
+        let (_, body) = send(&app, signed_get("/api/state")).await;
+        let before: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let ranked = |state: &serde_json::Value| {
+            state["feed"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|row| row["nearness"] != "")
+                .count()
+        };
+        assert!(ranked(&before) > 2, "{body}");
+        assert_eq!(before["limits"]["editable"], true);
+        let (status, body) = send(
+            &app,
+            post_limits("/api/limits", r#"{"max_threads":2,"page_size":3}"#, true),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, body) = send(&app, signed_get("/api/state")).await;
+        let after: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(ranked(&after), 2, "{body}");
+        let (_, body) = send(&app, signed_get("/api/l/1.2.1/1.1.1/1.1.1")).await;
+        let room: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(room["messages"].as_array().unwrap().len(), 3, "{body}");
+        assert_eq!(room["more"], true);
     }
 
     #[tokio::test]

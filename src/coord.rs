@@ -11,6 +11,10 @@ use libphext::phext::{self, Coordinate};
 /// Library reserved for reader records. Chat topics use the other libraries.
 pub const ROSTER_LIBRARY: usize = 5;
 
+/// The lane's settings scroll: owners and limit overrides. Book 2 of the
+/// roster library, so it never collides with a reader (book 1).
+pub const SETTINGS_COORD: &str = "5.1.1/1.1.2/1.1.1";
+
 /// Library, shelf, series, collection, volume, book.
 /// Topic steps outweigh thread steps, so a different library cannot outrank
 /// a subscribed shelf just by being newer.

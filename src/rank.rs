@@ -117,6 +117,20 @@ pub fn build_feed(
     cap: usize,
     max_threads: usize,
 ) -> Feed {
+    build_feed_for(threads, interests, now, cap, max_threads, None)
+}
+
+/// [`build_feed`] for one reader. The reader's own posts are never held:
+/// the cap keeps other voices from flooding a feed, and nobody needs
+/// protecting from themselves. `reader` is a [`Message::poster_key`].
+pub fn build_feed_for(
+    threads: &[Thread],
+    interests: &[Coordinate],
+    now: DateTime<Utc>,
+    cap: usize,
+    max_threads: usize,
+    reader: Option<&str>,
+) -> Feed {
     let cap = cap.max(1);
     let mut volume: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for thread in threads {
@@ -164,6 +178,10 @@ pub fn build_feed(
                 continue;
             }
             let key = message.poster_key().to_string();
+            if reader.is_some_and(|reader| reader == key) {
+                admitted.push(message);
+                continue;
+            }
             let limit = if volume.get(key.as_str()).copied().unwrap_or(0) >= LOUD_AT {
                 cap
             } else {
@@ -777,6 +795,43 @@ mod tests {
         assert_eq!(feed.threads[0].title, "Fern wall");
         assert!(feed.lanes.is_empty());
         assert_eq!(admitted_by(&feed, "phext"), 0);
+    }
+
+    #[test]
+    fn a_reader_is_never_held_back_from_their_own_posts() {
+        let now = fixed();
+        let interest = parse_coord("1.1.1/1.1.1/1.1.1").unwrap();
+        let threads: Vec<Thread> = (1..=MAX_THREADS)
+            .map(|book| {
+                let mut note = message(
+                    &format!("1.1.1/1.1.{book}/1.1.2"),
+                    "wbic16",
+                    book as i64,
+                    "solo",
+                    now,
+                );
+                note.who = "google:1".into();
+                thread(&format!("1.1.1/1.1.{book}/1.1.1"), "Solo", "", vec![note])
+            })
+            .collect();
+        let others = build_feed(&threads, &[interest], now, AUTHOR_CAP, MAX_THREADS);
+        let shown = |feed: &Feed| {
+            feed.threads
+                .iter()
+                .filter(|t| !t.admitted.is_empty())
+                .count()
+        };
+        assert_eq!(shown(&others), AUTHOR_CAP);
+        let own = build_feed_for(
+            &threads,
+            &[interest],
+            now,
+            AUTHOR_CAP,
+            MAX_THREADS,
+            Some("google:1"),
+        );
+        assert_eq!(shown(&own), MAX_THREADS);
+        assert!(own.threads.iter().all(|t| t.held.is_empty()));
     }
 
     #[test]

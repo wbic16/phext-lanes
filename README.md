@@ -12,19 +12,19 @@ Open http://127.0.0.1:7841. The first run writes `data/chat.phext` with a Genera
 
 ---
 
-Predictive multi-chat, stored as one [phext](https://mirrorborn.us) file. The page is one feed: a line for each relevant thread, then a compose box. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
+Predictive multi-chat, stored as one [phext](https://mirrorborn.us) file. The page is one feed: a line for each relevant thread, then a compose box. Each line shows the thread's title, its newest note, and how many notes it holds and how recent the last one is. Messages that would flood the feed stay in the file and show up as a quiet "N more held" note.
 
 The cast is fictional: Mira Quill, Jules Fen, Ada North, Ren Sato, and Casey Horn. Casey is the hyper-poster.
 
 ## On the page
 
-With the demo cast seeded, you land on Mira's feed. Fern wall and Seed swap lead, because those are her interests. Each thread is one line. Click it to read the messages underneath. The box at the bottom says where the next message will go (`Posting to: Fern wall — change`). Enter posts. Shift+Enter adds a line. **change** picks another thread by name. **details** shows coordinates, scores, and who was held back.
+With the demo cast seeded, you land on Mira's feed. Fern wall and Seed swap lead, because those are her interests. Each thread is one line. Click it to read the messages underneath, numbered in order with who wrote each and when. With a thread open, the box replies to it. **Start a thread** sends just the next message to a new thread, then the box goes back to replying. The box at the bottom says where the next message will go (`Posting to: Fern wall — change`). Enter posts. Shift+Enter adds a line. **change** picks another thread by name. **details** shows coordinates, scores, and who was held back.
 
 Each thread, and each message inside it, has a quiet **link**. The address is always the full nine-part phext coordinate. A thread is its card scroll: `/l/1.2.1/1.1.1/1.1.1` opens Fern wall. A message is its own scroll: `/p/1.2.1/1.1.1/1.1.2` opens Fern wall with that message marked. A section of ordinary text is its first scroll, `/l/1.1.1/1.1.1/2.1.1`. Shorter or looser forms redirect to the nine-part one: a six-part thread (`/l/1.2.1/1.1.1`), semicolons in place of slashes, and links from older builds (`/l/k…`, `/p/k…`, `/l/s…`). An unknown address says it doesn't go anywhere.
 
 To link from a message, type the nine-part address. A thread card such as `1.2.1/1.1.1/1.1.1` links to that thread; any other scroll such as `1.2.1/1.1.1/1.1.2` links to that message. `/l/…` or `/p/…` in front picks the kind explicitly. Messages in an open thread alternate background shades so neighbouring scrolls are easy to tell apart.
 
-The name at the top switches reader. Casey's feed opens on General, and he still only gets two lines, so the quieter voices stay visible. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
+The name at the top switches reader. Casey's feed opens on General. Other readers only see two lines of his, so the quieter voices stay visible in their feeds. **Reset demo** lives under details. `cargo run -- --seed` restores the same cast.
 
 **fork** downloads this phext. An open thread also has a fork of just that thread. The menu switches fabric. The default fabric keeps `/l/…` and `/p/…`. Another fabric lives at `/f/<name>/…`, in `data/fabrics/<name>.phext` locally and `/var/lib/phext-lanes/fabrics/<name>.phext` on the server. **create fabric** is for [founding plot holders in Tessera](https://mirrorborn.us). Until that check is connected, the server allows it only with the admin token in `/etc/phext-lanes/admin.env`, which `deploy.sh` creates on the server and does not print. Browsing, permalinks, and fork stay open.
 
@@ -198,7 +198,7 @@ Nearness, shown only under details: 0 subscribed, 1–3 next door, 4–12 same w
 
 ### The lane
 
-An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in one reader's feed, wherever those lines would have ranked. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
+An author with **8 or more** messages in the phext is loud. A loud author gets at most **2** lines in another reader's feed, wherever those lines would have ranked. Your own posts are never held back in your own feed. The rest stay in the file and in the thread when you open it. The feed only says how many were held. Quieter authors are not capped, which is why Jules's plane notes and Ada's river notes survive even when Casey has been posting in those rooms.
 
 General is marked flooded, under details, when one author wrote at least 70% of a room of 10 or more messages. Casey is 12 of 15 there. Fern wall is half Casey and is not marked; the cap still holds him to two lines.
 

@@ -122,8 +122,24 @@
   }
   .copylink.for-thread { padding: 1rem 0; }
   .copylink:hover, .copylink:focus-visible { color: var(--muted); }
-  .by .copylink { margin-left: 0.45rem; }
+  .by .copylink { margin-left: 0.1rem; }
+  .nth {
+    min-width: 1.4rem;
+    color: var(--faint);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+  .who { color: var(--ink); font-weight: 600; }
+  .by time { color: var(--faint); font-size: 0.8rem; }
+  .by + p { padding-left: 1.85rem; }
   .title { flex: none; font-weight: 600; }
+  .count {
+    flex: none;
+    margin-left: auto;
+    color: var(--faint);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+  }
   .preview {
     min-width: 0;
     overflow: hidden;
@@ -154,7 +170,14 @@
     text-underline-offset: 0.15em;
   }
   .msg p a:hover, .msg p a:focus-visible { text-decoration-color: var(--ink); }
-  .by { margin: 0 0 0.2rem; color: var(--muted); font-size: 0.88rem; }
+  .by {
+    display: flex;
+    gap: 0.45rem;
+    align-items: baseline;
+    margin: 0 0 0.2rem;
+    color: var(--muted);
+    font-size: 0.88rem;
+  }
   .msg p { margin: 0; white-space: pre-wrap; }
   .held {
     margin: 1.75rem 0 0;
@@ -485,6 +508,8 @@ function visibleThreads(threads) {
       score: 0,
       messages: message ? [message] : [],
       held: [],
+      notes: state.room.message_count || 0,
+      latest: state.room.messages.reduce((best, note) => (note.ts > best ? note.ts : best), ""),
       plain: Boolean(state.room.plain),
     });
   }
@@ -503,6 +528,45 @@ function restAfter(text) {
   return lines.slice(index + 1).join("\n").trim();
 }
 
+function ago(ts) {
+  const then = Date.parse(ts || "");
+  if (!Number.isFinite(then)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (minutes < 1) return "now";
+  if (minutes < 60) return minutes + "m";
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return hours + "h";
+  const days = Math.round(hours / 24);
+  if (days < 30) return days + "d";
+  return new Date(then).toISOString().slice(0, 10);
+}
+
+function plural(count, word) {
+  return count + " " + word + (count === 1 ? "" : "s");
+}
+
+// "3 notes · 2h" from everything the feed knows about a thread, held or not.
+function threadMeta(thread) {
+  if (thread.plain) return "";
+  const notes = thread.notes || 0;
+  if (!notes) return "empty";
+  const when = ago(thread.latest);
+  return plural(notes, "note") + (when ? " · " + when : "");
+}
+
+// The newest shown note, unless it only repeats the thread's title.
+function rowPreview(thread) {
+  const message = thread.messages[0];
+  if (!message) return "";
+  const text = String(message.preview || message.text || "").trim();
+  if (thread.plain) return text;
+  if (thread.notes === 1 && text.toLowerCase().startsWith(String(thread.title).toLowerCase())) {
+    const rest = text.slice(thread.title.length).trim();
+    return rest ? message.author + ": …" + rest : "";
+  }
+  return message.author + ": " + text;
+}
+
 function renderFeed(threads) {
   const feed = $("feed");
   feed.replaceChildren();
@@ -519,11 +583,8 @@ function renderFeed(threads) {
   }
   for (const thread of shown) {
     const item = el("article", { class: "item" });
-    const message = thread.messages[0];
-    const named = message && message.author && message.author !== "phext" && !thread.plain;
-    const preview = message
-      ? (named ? message.author + ": " : "") + (message.preview || message.text)
-      : (thread.plain ? "" : "No notes yet");
+    const preview = rowPreview(thread);
+    const meta = threadMeta(thread);
     const row = el("button", {
       type: "button",
       class: "row",
@@ -532,6 +593,7 @@ function renderFeed(threads) {
     }, [
       el("span", { class: "title", text: thread.title }),
       preview ? el("span", { class: "preview", text: preview }) : null,
+      meta ? el("span", { class: "count", text: meta }) : null,
     ]);
     const line = el("div", { class: "rowline" }, [
       row,
@@ -593,7 +655,7 @@ function fillReading(host) {
     return;
   }
   if (room.thread !== state.open) return;
-  for (const message of room.messages) {
+  room.messages.forEach((message, index) => {
     const plain = Boolean(room.plain) || message.author === "phext";
     const marked = state.highlight === message.id;
     const link = el("button", {
@@ -614,7 +676,10 @@ function fillReading(host) {
       body = [title, rest ? linkedText("p", rest) : null];
     } else {
       const by = el("p", { class: "by" });
-      by.append(message.author + " ");
+      by.append(el("span", { class: "nth", text: String((room.offset || 0) + index + 1) }));
+      by.append(el("span", { class: "who", text: message.author }));
+      const when = ago(message.ts);
+      if (when) by.append(el("time", { datetime: message.ts, title: message.ts, text: when }));
       by.append(link);
       by.append(coord);
       body = [by, linkedText("p", message.text)];
@@ -623,8 +688,8 @@ function fillReading(host) {
       class: marked ? "msg mark" : "msg",
       id: marked ? "marked" : null,
     }, body));
-  }
-  if (!room.messages.length) host.append(el("p", { class: "empty", text: "No notes yet. The box below replies here, or starts a thread." }));
+  });
+  if (!room.messages.length) host.append(el("p", { class: "empty", text: "Nothing here yet. The box below replies to this thread." }));
   if (room.more) {
     host.append(el("button", {
       type: "button",
@@ -1004,6 +1069,7 @@ async function place(event) {
   $("text").value = "";
   state.override = null;
   state.suggestion = null;
+  state.fresh = false;
   setStatus("Posted to " + body.title + ".", false);
   await loadState();
   if (routeFromPath()) await applyRoute();

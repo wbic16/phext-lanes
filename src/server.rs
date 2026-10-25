@@ -1367,10 +1367,14 @@ fn snapshot(
     meta: &FabricView,
 ) -> Result<StateDto, AppError> {
     let world = store.world();
-    let (viewer, interests) = if let Some(session) = session {
+    let (viewer, interests, reader) = if let Some(session) = session {
         if let Some(user) = world.find_user(&session.who) {
             let interests = user.interests.clone();
-            (viewer_dto(world, user), interests)
+            (
+                viewer_dto(world, user),
+                interests,
+                Some(session.who.clone()),
+            )
         } else {
             (
                 ViewerDto {
@@ -1380,6 +1384,7 @@ fn snapshot(
                     interests: Vec::new(),
                 },
                 Vec::new(),
+                Some(session.who.clone()),
             )
         }
     } else if world.users.is_empty() {
@@ -1391,11 +1396,12 @@ fn snapshot(
                 interests: Vec::new(),
             },
             Vec::new(),
+            None,
         )
     } else {
         let user = resolve_user(world, user_query)?;
         let interests = user.interests.clone();
-        (viewer_dto(world, user), interests)
+        (viewer_dto(world, user), interests, Some(user.name.clone()))
     };
     let now = Utc::now();
     let chat: Vec<crate::model::Thread> = world
@@ -1404,7 +1410,14 @@ fn snapshot(
         .filter(|thread| !thread.plain)
         .cloned()
         .collect();
-    let feed = rank::build_feed(&chat, &interests, now, rank::AUTHOR_CAP, rank::MAX_THREADS);
+    let feed = rank::build_feed_for(
+        &chat,
+        &interests,
+        now,
+        rank::AUTHOR_CAP,
+        rank::MAX_THREADS,
+        reader.as_deref(),
+    );
     let map = rank::map_of(&chat, &interests);
     let mut feed_rows = feed_dto(&feed);
     for thread in world.threads.iter().filter(|thread| !thread.plain) {
@@ -1480,10 +1493,19 @@ fn quiet_row(thread: &crate::model::Thread) -> FeedThreadDto {
         distance: 0,
         score: 0.0,
         nearness: String::new(),
-        messages: Vec::new(),
+        messages: newest(&thread.messages).map(msg_dto).into_iter().collect(),
         held: Vec::new(),
+        notes: thread.messages.len(),
+        latest: newest(&thread.messages).map(|message| stamp(message.ts)),
         plain: false,
     }
+}
+
+fn newest<'a>(messages: impl IntoIterator<Item = &'a Message>) -> Option<&'a Message> {
+    messages
+        .into_iter()
+        .filter(|message| !message.plain)
+        .max_by(|a, b| a.ts.cmp(&b.ts).then(a.coord.cmp(&b.coord)))
 }
 
 fn viewer_dto(world: &crate::store::World, user: &crate::model::User) -> ViewerDto {
@@ -1523,6 +1545,9 @@ fn feed_dto(feed: &Feed) -> Vec<FeedThreadDto> {
             nearness: thread.nearness.to_string(),
             messages: thread.admitted.iter().map(msg_dto).collect(),
             held: thread.held.iter().map(msg_dto).collect(),
+            notes: thread.admitted.len() + thread.held.len(),
+            latest: newest(thread.admitted.iter().chain(&thread.held))
+                .map(|message| stamp(message.ts)),
             plain: false,
         })
         .collect()
@@ -1556,6 +1581,8 @@ fn plain_row(thread: &crate::model::Thread) -> FeedThreadDto {
         nearness: String::new(),
         messages: preview_message.into_iter().collect(),
         held: Vec::new(),
+        notes: thread.messages.len(),
+        latest: None,
         plain: true,
     }
 }
@@ -1757,6 +1784,10 @@ struct FeedThreadDto {
     nearness: String,
     messages: Vec<MsgDto>,
     held: Vec<MsgDto>,
+    /// Every note in the thread, shown or held.
+    notes: usize,
+    /// Timestamp of the newest note.
+    latest: Option<String>,
     plain: bool,
 }
 

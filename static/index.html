@@ -20,6 +20,7 @@
     --line: #e6e0d6;
     --preview: #4a453f;
     --mark: #efe6d4;
+    --band: #ece8df;
     --dock: rgba(244, 241, 234, 0.94);
     --danger: #8a3a2a;
   }
@@ -33,6 +34,7 @@
       --line: #3a342c;
       --preview: #c9bfb2;
       --mark: #2a261f;
+      --band: #1e1b17;
       --dock: rgba(22, 20, 17, 0.94);
       --danger: #e0a090;
     }
@@ -138,14 +140,20 @@
     font-size: 0.82rem;
   }
   .reading { padding: 0.25rem 0 0.5rem; }
-  .msg { margin: 1.35rem 0 1.5rem; }
-  .msg.mark {
-    background: var(--mark);
+  .msg {
     border-radius: 2px;
-    margin-left: -0.55rem;
-    margin-right: -0.55rem;
-    padding: 0.45rem 0.55rem 0.55rem;
+    margin: 0 -0.55rem;
+    padding: 0.7rem 0.55rem 0.8rem;
   }
+  .msg:first-of-type { margin-top: 0.65rem; }
+  .msg:nth-of-type(even) { background: var(--band); }
+  .msg.mark { background: var(--mark); }
+  .msg p a {
+    color: inherit;
+    text-decoration-color: var(--faint);
+    text-underline-offset: 0.15em;
+  }
+  .msg p a:hover, .msg p a:focus-visible { text-decoration-color: var(--ink); }
   .by { margin: 0 0 0.2rem; color: var(--muted); font-size: 0.88rem; }
   .msg p { margin: 0; white-space: pre-wrap; }
   .held {
@@ -603,13 +611,13 @@ function fillReading(host) {
       title.append(link);
       title.append(coord);
       const rest = restAfter(message.text);
-      body = [title, rest ? el("p", { text: rest }) : null];
+      body = [title, rest ? linkedText("p", rest) : null];
     } else {
       const by = el("p", { class: "by" });
       by.append(message.author + " ");
       by.append(link);
       by.append(coord);
-      body = [by, el("p", { text: message.text })];
+      body = [by, linkedText("p", message.text)];
     }
     host.append(el("article", {
       class: marked ? "msg mark" : "msg",
@@ -635,11 +643,38 @@ function routeFromPath() {
     if (!path.startsWith(base + "/")) return null;
     path = path.slice(base.length);
   }
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length === 2 && (parts[0] === "l" || parts[0] === "p")) {
-    return { kind: parts[0], id: decodeURIComponent(parts[1]) };
+  const match = /^\/([lp])\/(.+?)\/?$/.exec(path);
+  if (!match || match[2].endsWith("/chat.phext")) return null;
+  return { kind: match[1], id: decodeURIComponent(match[2]) };
+}
+
+// A nine-part phext address (1.1.1/1.1.2/1.1.3), with an optional /l/ or
+// /p/ in front. Semicolons count as slashes. Without a prefix, a thread card
+// (…/1.1.1) opens the thread and any other scroll opens that post.
+const COORD_LINK = /(\/[lp]\/)?(?<![\d.])(\d{1,4}\.\d{1,4}\.\d{1,4}[\/;]\d{1,4}\.\d{1,4}\.\d{1,4}[\/;]\d{1,4}\.\d{1,4}\.\d{1,4})(?!\d|\.\d|[\/;]\d)/g;
+
+function linkedText(tag, text) {
+  const node = el(tag);
+  let last = 0;
+  for (const match of text.matchAll(COORD_LINK)) {
+    const coord = match[2].replace(/;/g, "/");
+    const kind = match[1] ? match[1][1] : (coord.endsWith("/1.1.1") ? "l" : "p");
+    node.append(text.slice(last, match.index));
+    const path = "/" + kind + "/" + coord;
+    node.append(el("a", {
+      href: root() + path,
+      text: match[0],
+      onclick: (event) => {
+        if (event.metaKey || event.ctrlKey || event.shiftKey || event.button) return;
+        event.preventDefault();
+        go(path);
+        applyRoute().catch((err) => setStatus(err.message, true));
+      },
+    }));
+    last = match.index + match[0].length;
   }
-  return null;
+  node.append(text.slice(last));
+  return node;
 }
 
 function go(path) {
@@ -780,7 +815,7 @@ async function toggleThread(thread) {
 
 async function openLinked(route) {
   const gen = ++state.routeGen;
-  const res = await fetch(api("/api/" + route.kind + "/" + encodeURIComponent(route.id)));
+  const res = await fetch(api("/api/" + route.kind + "/" + route.id));
   const body = await res.json().catch(() => ({}));
   if (gen !== state.routeGen) return;
   if (!res.ok) {
@@ -814,7 +849,7 @@ async function applyRoute() {
 async function loadLane(id, offset) {
   if (!id) return;
   const open = state.open;
-  const res = await fetch(api("/api/l/" + encodeURIComponent(id) + "?offset=" + String(offset || 0)));
+  const res = await fetch(api("/api/l/" + id + "?offset=" + String(offset || 0)));
   const body = await res.json().catch(() => ({}));
   if (state.open !== open) return;
   if (!res.ok) {

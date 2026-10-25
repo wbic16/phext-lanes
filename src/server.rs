@@ -204,20 +204,30 @@ fn handle(
     let query = query_map(uri);
     match &parsed.route {
         Route::Home => guarded_page(app, fabric, headers, PageView::Home, "/"),
-        Route::Lane(id) => guarded_page(
-            app,
-            fabric,
-            headers,
-            PageView::Lane(id),
-            &format!("/l/{id}"),
-        ),
-        Route::Post(id) => guarded_page(
-            app,
-            fabric,
-            headers,
-            PageView::Post(id),
-            &format!("/p/{id}"),
-        ),
+        Route::Lane(id) => {
+            if let Some(moved) = moved(fabric, uri, "l", id, crate::link::canonical_lane(id)) {
+                return Ok(moved);
+            }
+            guarded_page(
+                app,
+                fabric,
+                headers,
+                PageView::Lane(id),
+                &format!("/l/{id}"),
+            )
+        }
+        Route::Post(id) => {
+            if let Some(moved) = moved(fabric, uri, "p", id, crate::link::canonical_post(id)) {
+                return Ok(moved);
+            }
+            guarded_page(
+                app,
+                fabric,
+                headers,
+                PageView::Post(id),
+                &format!("/p/{id}"),
+            )
+        }
         Route::Download { lane } => {
             admit_read(app, headers, fabric)?;
             Ok(download(app, fabric, lane.as_deref())?)
@@ -699,6 +709,29 @@ impl Route {
 
 fn method_not_allowed() -> Response {
     (StatusCode::METHOD_NOT_ALLOWED, "method").into_response()
+}
+
+/// A permanent redirect from a legacy id, or a semicolon form, to the
+/// canonical coordinate address. None when `id` is already canonical or
+/// does not name a coordinate at all.
+fn moved(
+    fabric: Option<&str>,
+    uri: &Uri,
+    kind: &str,
+    id: &str,
+    canonical: Option<String>,
+) -> Option<Response> {
+    let canonical = canonical?;
+    if canonical == id {
+        return None;
+    }
+    let mut location = format!("{}/{kind}/{canonical}", public_prefix(fabric));
+    if let Some(query) = uri.query() {
+        location.push('?');
+        location.push_str(query);
+    }
+    let value = HeaderValue::from_str(&location).ok()?;
+    Some((StatusCode::PERMANENT_REDIRECT, [(header::LOCATION, value)]).into_response())
 }
 
 fn public_prefix(fabric: Option<&str>) -> String {
@@ -2057,6 +2090,11 @@ mod http_tests {
         }
     }
 
+    /// The fixtures read the demo cast. A missing file would get the primer.
+    fn demo(dir: &std::path::Path) {
+        std::fs::write(dir.join("chat.phext"), crate::seed::document(Utc::now())).unwrap();
+    }
+
     fn app() -> (Router, Temp) {
         let dir = std::env::temp_dir().join(format!(
             "lanes-route-{}-{}",
@@ -2064,6 +2102,7 @@ mod http_tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        demo(&dir);
         let state = AppState::with_auth(
             dir.join("chat.phext"),
             Arc::new(crate::auth::AdminTokenCheck::from_token("plot-secret")),
@@ -2113,7 +2152,7 @@ mod http_tests {
         let (status, body) = send(
             &app,
             Request::builder()
-                .uri("/l/kcre66i9s")
+                .uri("/l/1.2.1/1.1.1/1.1.1")
                 .header("x-forwarded-proto", "https")
                 .header("host", "mc.phext.io")
                 .body(Body::empty())
@@ -2123,7 +2162,8 @@ mod http_tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("property=\"og:title\" content=\"Fern wall\""));
         assert!(body.contains("property=\"og:description\" content=\"The north-wall ferns"));
-        assert!(body.contains("property=\"og:url\" content=\"https://mc.phext.io/l/kcre66i9s\""));
+        assert!(body
+            .contains("property=\"og:url\" content=\"https://mc.phext.io/l/1.2.1/1.1.1/1.1.1\""));
         assert!(body.contains("id=\"text\""));
         assert!(body.contains("copylink"));
         assert!(!body.contains("%%"));
@@ -2131,7 +2171,7 @@ mod http_tests {
         let (status, body) = send(
             &app,
             Request::builder()
-                .uri("/p/k5v1j4f4ds79m9t")
+                .uri("/p/1.2.1/1.1.1/1.1.2")
                 .header("x-forwarded-proto", "https")
                 .header("host", "mc.phext.io")
                 .body(Body::empty())
@@ -2143,7 +2183,7 @@ mod http_tests {
         assert!(body.contains("property=\"og:title\" content=\"Fern wall — Mira Quill\""));
         assert!(body.contains("property=\"og:description\" content=\"The north-wall ferns"));
         assert!(body.contains("property=\"og:type\" content=\"article\""));
-        assert!(body.contains("https://mc.phext.io/p/k5v1j4f4ds79m9t"));
+        assert!(body.contains("https://mc.phext.io/p/1.2.1/1.1.1/1.1.2"));
         drop(file);
     }
 
@@ -2153,10 +2193,13 @@ mod http_tests {
         for uri in [
             "/l/nope",
             "/p/nope",
-            "/p/k0",
-            "/l/k5v1j4f4ds79m9t",
+            "/p/1.1.1/1.1.1/1.1.1",
+            "/p/1.2.1/1.1.1",
+            "/l/9.9.9/9.9.9/1.1.1",
+            "/l/0.1.1/1.1.1/1.1.1",
             "/api/l/nope",
             "/api/p/kzzzz",
+            "/api/p/1.2.1/1.1.1/1.1.999",
         ] {
             let (status, body) = send(&app, get(uri)).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{uri}: {body}");
@@ -2169,6 +2212,32 @@ mod http_tests {
         assert!(!html.contains("id=\"text\""));
         let (_, json) = send(&app, get("/api/l/nope")).await;
         assert!(json.contains("\"error\""));
+    }
+
+    #[tokio::test]
+    async fn legacy_ids_and_semicolons_redirect_to_the_coordinate() {
+        let (app, _file) = app();
+        for (from, to) in [
+            ("/l/kcre66i9s", "/l/1.2.1/1.1.1/1.1.1"),
+            ("/p/k5v1j4f4ds79m9t", "/p/1.2.1/1.1.1/1.1.2"),
+            ("/p/1.2.1;1.1.1;1.1.2", "/p/1.2.1/1.1.1/1.1.2"),
+            ("/f/incipit/l/s0", "/f/incipit/l/1.1.1/1.1.1/1.1.1"),
+            ("/l/kcre66i9s?welcome=1", "/l/1.2.1/1.1.1/1.1.1?welcome=1"),
+            ("/l/1.2.1/1.1.1", "/l/1.2.1/1.1.1/1.1.1"),
+            ("/l/1.2.1/1.1.1/1.1.5", "/l/1.2.1/1.1.1/1.1.1"),
+        ] {
+            let response = app.clone().oneshot(get(from)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT, "{from}");
+            assert_eq!(response.headers()[header::LOCATION], to, "{from}");
+        }
+        let (status, body) = send(&app, get("/api/l/kcre66i9s")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"id\":\"1.2.1/1.1.1/1.1.1\""), "{body}");
+        for uri in ["/l/1.2.1/1.1.1/1.1.1", "/l/1.2.1%2F1.1.1%2F1.1.1"] {
+            let (status, page) = send(&app, get(uri)).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert!(page.contains("Fern wall"), "{uri}");
+        }
     }
 
     #[tokio::test]
@@ -2189,28 +2258,28 @@ mod http_tests {
         assert!(body.contains("http://127.0.0.1:7841/"));
         assert!(body.contains("Posting to:"));
 
-        let (status, body) = send(&app, get("/api/l/kcre66i9s")).await;
+        let (status, body) = send(&app, get("/api/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["title"], "Fern wall");
-        assert_eq!(json["id"], "kcre66i9s");
+        assert_eq!(json["id"], "1.2.1/1.1.1/1.1.1");
         assert!(json.get("highlight").is_none());
         assert!(json["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|message| message["id"] == "k5v1j4f4ds79m9t"));
+            .any(|message| message["id"] == "1.2.1/1.1.1/1.1.2"));
 
-        let (status, body) = send(&app, get("/api/p/k5v1j4f4ds79m9t")).await;
+        let (status, body) = send(&app, get("/api/p/1.2.1/1.1.1/1.1.2")).await;
         assert_eq!(status, StatusCode::OK);
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(json["highlight"], "k5v1j4f4ds79m9t");
-        assert_eq!(json["id"], "kcre66i9s");
+        assert_eq!(json["highlight"], "1.2.1/1.1.1/1.1.2");
+        assert_eq!(json["id"], "1.2.1/1.1.1/1.1.1");
         let marked = json["messages"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|message| message["id"] == "k5v1j4f4ds79m9t")
+            .find(|message| message["id"] == "1.2.1/1.1.1/1.1.2")
             .unwrap();
         assert!(marked["text"]
             .as_str()
@@ -2240,7 +2309,8 @@ mod http_tests {
         let id = posted["id"].as_str().unwrap().to_string();
         let lane = posted["lane"].as_str().unwrap().to_string();
         assert_ne!(id, lane);
-        assert!(id.starts_with('k'));
+        assert_eq!(lane, "1.2.1/1.1.2/1.1.1");
+        assert_eq!(id, "1.2.1/1.1.2/1.1.2");
 
         let (status, page) = send(&app, get(&format!("/p/{id}"))).await;
         assert_eq!(status, StatusCode::OK);
@@ -2293,7 +2363,7 @@ mod http_tests {
         assert!(body.contains("north-wall ferns"));
         assert!(body.contains("starter is slow"));
 
-        let (status, _headers, lane) = send_parts(&app, get("/l/kcre66i9s/chat.phext")).await;
+        let (status, _headers, lane) = send_parts(&app, get("/l/1.2.1/1.1.1/chat.phext")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(lane.contains("north-wall ferns"));
         assert!(!lane.contains("starter is slow"));
@@ -2333,7 +2403,7 @@ mod http_tests {
         assert!(page.contains("data-fabric=\"notes\""));
         assert!(page.contains("href=\"/f/notes/chat.phext\""));
         assert!(page.contains("https://mirrorborn.us"));
-        let (status, home) = send(&app, get("/l/kcre66i9s")).await;
+        let (status, home) = send(&app, get("/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(home.contains("data-fabric=\"\""));
         assert!(home.contains("href=\"/chat.phext\""));
@@ -2435,7 +2505,7 @@ mod http_tests {
             .find(|thread| thread["title"] == "Fern wall")
             .unwrap();
         assert_eq!(fern["plain"], false);
-        assert_eq!(fern["id"], "kcre66i9s");
+        assert_eq!(fern["id"], "1.2.1/1.1.1/1.1.1");
         assert_eq!(fern["messages"][0]["author"], "Mira Quill");
         let incipit = json["feed"]
             .as_array()
@@ -2444,10 +2514,10 @@ mod http_tests {
             .find(|thread| thread["title"] == "Incipit (It Begins)")
             .unwrap();
         assert_eq!(incipit["plain"], true);
-        assert_eq!(incipit["id"], "s0");
+        assert_eq!(incipit["id"], "1.1.1/1.1.1/1.1.1");
         assert_eq!(incipit["thread"], "1.1.1/1.1.1/1.1");
 
-        let (status, body) = send(&app, get("/f/incipit/api/l/s0")).await;
+        let (status, body) = send(&app, get("/f/incipit/api/l/1.1.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let room: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(room["messages"].as_array().unwrap().len(), 2);
@@ -2457,29 +2527,30 @@ mod http_tests {
             .starts_with("TTSM"));
         assert_eq!(room["more"], false);
 
-        let (status, body) = send(&app, get("/f/incipit/api/p/k1")).await;
+        let (status, body) = send(&app, get("/f/incipit/api/p/1.1.1/1.1.1/1.1.2")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let post: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(post["highlight"], "k1");
-        assert_eq!(post["id"], "s0");
+        assert_eq!(post["highlight"], "1.1.1/1.1.1/1.1.2");
+        assert_eq!(post["id"], "1.1.1/1.1.1/1.1.1");
         assert_eq!(post["plain"], true);
 
-        let (status, page) = send(&app, get("/f/incipit/p/k1")).await;
+        let (status, page) = send(&app, get("/f/incipit/p/1.1.1/1.1.1/1.1.2")).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         assert!(page.contains("TTSM"));
         assert!(!page.contains("phext —"));
 
-        let (status, _headers, fork) = send_parts(&app, get("/f/incipit/l/s0/chat.phext")).await;
+        let (status, _headers, fork) =
+            send_parts(&app, get("/f/incipit/l/1.1.1/1.1.1/1.1.1/chat.phext")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(fork.contains("The opening stays."));
         assert!(fork.contains("TTSM"));
         assert!(!fork.contains("Another chapter."));
 
-        let (status, body) = send(&app, get("/f/incipit/api/l/kcre66i9s")).await;
+        let (status, body) = send(&app, get("/f/incipit/api/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let fern_room: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(fern_room["plain"], false);
-        assert_eq!(fern_room["id"], "kcre66i9s");
+        assert_eq!(fern_room["id"], "1.2.1/1.1.1/1.1.1");
         assert_eq!(fern_room["messages"][0]["author"], "Mira Quill");
     }
 
@@ -2506,10 +2577,10 @@ mod http_tests {
         let json: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(json["feed"].as_array().unwrap().len(), 1);
         assert_eq!(json["feed"][0]["title"], "Scroll 1");
-        assert_eq!(json["feed"][0]["id"], "s0");
+        assert_eq!(json["feed"][0]["id"], "1.1.1/1.1.1/1.1.1");
         assert_eq!(json["users"].as_array().unwrap().len(), 0);
 
-        let (status, body) = send(&app, get("/f/long/api/l/s0")).await;
+        let (status, body) = send(&app, get("/f/long/api/l/1.1.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let first: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(first["messages"].as_array().unwrap().len(), 40);
@@ -2518,7 +2589,7 @@ mod http_tests {
         assert_eq!(first["message_count"], 45);
         assert!(!body.contains("secret-body-45"));
 
-        let (status, body) = send(&app, get("/f/long/api/l/s0?offset=40")).await;
+        let (status, body) = send(&app, get("/f/long/api/l/1.1.1/1.1.1/1.1.1?offset=40")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         let second: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(second["messages"].as_array().unwrap().len(), 5);
@@ -2586,6 +2657,7 @@ mod http_tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        demo(&dir);
         let state = AppState::with_gates(
             dir.join("chat.phext"),
             Arc::new(crate::auth::AdminTokenCheck::from_token("plot-secret")),
@@ -2611,7 +2683,7 @@ mod http_tests {
     #[tokio::test]
     async fn reading_and_fork_stay_open_without_a_session() {
         let (app, _file) = app();
-        let (status, body) = send(&app, get("/l/kcre66i9s")).await;
+        let (status, body) = send(&app, get("/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Fern wall"));
         let (status, _headers, fork) = send_parts(&app, get("/chat.phext")).await;
@@ -2662,7 +2734,7 @@ mod http_tests {
     async fn github_sign_in_sets_a_session_and_the_poster_identity() {
         let (app, file) = app();
         let (status, headers, _body) =
-            send_parts(&app, get("/auth/github?next=/l/kcre66i9s")).await;
+            send_parts(&app, get("/auth/github?next=/l/1.2.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::FOUND);
         let location = headers.get(header::LOCATION).unwrap().to_str().unwrap();
         assert!(location.starts_with("https://github.com/login/oauth/authorize?"));
@@ -2695,7 +2767,7 @@ mod http_tests {
         assert_eq!(status, StatusCode::FOUND, "{body}");
         assert_eq!(
             headers.get(header::LOCATION).unwrap().to_str().unwrap(),
-            "/l/kcre66i9s"
+            "/l/1.2.1/1.1.1/1.1.1"
         );
         let session = set_cookie(&headers, "lanes_session");
         assert!(!session.is_empty());
@@ -2831,6 +2903,7 @@ mod http_tests {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        demo(&dir);
         let state = AppState::with_owners(
             dir.join("chat.phext"),
             Arc::new(crate::auth::AdminTokenCheck::from_token("plot-secret")),
@@ -2891,7 +2964,7 @@ mod http_tests {
             &crate::oauth::Oauth::test_session_cookie(),
             crate::oauth::TEST_CSRF,
         );
-        for uri in ["/", "/l/kcre66i9s", "/p/k5v1j4f4ds79m9t"] {
+        for uri in ["/", "/l/1.2.1/1.1.1/1.1.1", "/p/1.2.1/1.1.1/1.1.2"] {
             let (status, body) = send(
                 &app,
                 Request::builder()
@@ -2912,7 +2985,7 @@ mod http_tests {
         let (status, body) = send(
             &app,
             Request::builder()
-                .uri("/api/l/kcre66i9s")
+                .uri("/api/l/1.2.1/1.1.1/1.1.1")
                 .header("cookie", &cookie)
                 .body(Body::empty())
                 .unwrap(),
@@ -2950,7 +3023,7 @@ mod http_tests {
         let (status, body) = send(&app, get("/f/incipit/api/state?user=x")).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert!(body.contains("Incipit (It Begins)"));
-        let (status, page) = send(&app, get("/f/incipit/l/s0")).await;
+        let (status, page) = send(&app, get("/f/incipit/l/1.1.1/1.1.1/1.1.1")).await;
         assert_eq!(status, StatusCode::OK, "{page}");
         assert!(page.contains("The opening stays."));
         let (status, _, fork) = send_parts(&app, get("/f/incipit/chat.phext")).await;
@@ -2986,7 +3059,7 @@ mod http_tests {
         let (status, page) = send(
             &app,
             Request::builder()
-                .uri("/l/kcre66i9s")
+                .uri("/l/1.2.1/1.1.1/1.1.1")
                 .header("cookie", format!("lanes_session={cookie}"))
                 .body(Body::empty())
                 .unwrap(),

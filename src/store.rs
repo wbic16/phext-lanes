@@ -54,27 +54,28 @@ impl World {
     }
 
     pub fn find_lane(&self, id: &str) -> Option<&Thread> {
-        if let Some(coord) = crate::link::parse_section_lane_id(id) {
-            let key = section_key(coord);
-            return self
-                .threads
+        let chat = |coord: Coordinate| {
+            self.threads
                 .iter()
-                .find(|thread| thread.plain && section_key(thread.coord) == key);
+                .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(coord))
+        };
+        let plain = |coord: Coordinate| {
+            let key = section_key(coord);
+            self.threads
+                .iter()
+                .find(|thread| thread.plain && section_key(thread.coord) == key)
+        };
+        // Nine parts: a chat thread's card at `…/1.1.1`, otherwise a section.
+        if let Some(coord) = crate::link::parse_section_lane_id(id) {
+            if coord.x.chapter == 1 && coord.x.section == 1 {
+                if let Some(thread) = chat(coord) {
+                    return Some(thread);
+                }
+            }
+            return plain(coord);
         }
         let coord = crate::link::parse_lane_id(id)?;
-        if let Some(thread) = self
-            .threads
-            .iter()
-            .find(|thread| !thread.plain && thread_key(thread.coord) == thread_key(coord))
-        {
-            return Some(thread);
-        }
-        self.threads.iter().find(|thread| {
-            thread.plain
-                && thread.coord.x.chapter == 1
-                && thread.coord.x.section == 1
-                && thread_key(thread.coord) == thread_key(coord)
-        })
+        chat(coord).or_else(|| plain(coord))
     }
 
     /// The message scroll named by a post id. The thread card is not a post.
@@ -169,8 +170,10 @@ impl Store {
                 return Ok(Store::from_doc(path, doc));
             }
         }
+        // A new chat starts with a General thread and the phext primer.
+        // The demo cast is only written by `--seed` or the reset button.
         let mut store = Store::from_doc(path, String::new());
-        store.reseed(Utc::now())?;
+        store.persist(seed::blank(Utc::now()))?;
         Ok(store)
     }
 
@@ -252,7 +255,7 @@ impl Store {
             )));
         }
         let mut store = Store::from_doc(path.to_path_buf(), String::new());
-        store.persist(seed::blank())
+        store.persist(seed::blank(Utc::now()))
     }
 
     /// Add a reader, or refresh their display name. Interests start empty.
@@ -632,6 +635,13 @@ mod tests {
         std::env::temp_dir().join(format!("lanes-{}-{id}.phext", std::process::id()))
     }
 
+    /// A temp file holding the demo cast.
+    fn demo_path() -> PathBuf {
+        let path = temp_path();
+        fs::write(&path, seed::document(Utc::now())).unwrap();
+        path
+    }
+
     #[test]
     fn phext_insert_fetch_and_toc_roundtrip() {
         let alpha = parse_coord("1.1.1/1.1.1/1.1.1").unwrap();
@@ -702,7 +712,7 @@ mod tests {
 
     #[test]
     fn message_text_cannot_inject_a_scroll_break() {
-        let path = temp_path();
+        let path = demo_path();
         let _file = TempFile(path.clone());
         let mut store = Store::open(&path).unwrap();
         let placed = store
@@ -721,7 +731,7 @@ mod tests {
 
     #[test]
     fn place_persists_and_survives_reopen() {
-        let path = temp_path();
+        let path = demo_path();
         let _file = TempFile(path.clone());
         let mut store = Store::open(&path).unwrap();
         let placed = store
@@ -951,7 +961,10 @@ mod tests {
         assert_eq!(incipit.messages.len(), 2);
         assert_eq!(incipit.messages[0].author, model::PLAIN_AUTHOR);
         assert!(incipit.messages[1].text.starts_with("TTSM"));
-        assert_eq!(crate::link::section_lane_id(incipit.coord), "s0");
+        assert_eq!(
+            crate::link::section_lane_id(incipit.coord),
+            "1.1.1/1.1.1/1.1.1"
+        );
         assert_eq!(section_key(incipit.coord), "1.1.1/1.1.1/1.1");
 
         let chapter = world
@@ -980,9 +993,24 @@ mod tests {
             .unwrap();
         assert!(!fern.plain);
         assert_eq!(fern.messages[0].author, "Mira Quill");
-        assert_eq!(crate::link::lane_id(fern.coord), "kcre66i9s");
+        assert_eq!(crate::link::lane_id(fern.coord), "1.2.1/1.1.1/1.1.1");
+        assert_eq!(world.find_lane("1.2.1/1.1.1").unwrap().title, "Fern wall");
+        assert_eq!(
+            world.find_lane("1.2.1/1.1.1/1.1.1").unwrap().title,
+            "Fern wall"
+        );
         assert_eq!(world.find_lane("kcre66i9s").unwrap().title, "Fern wall");
+        assert_eq!(
+            world.find_lane("1.1.1/1.1.1/1.1.1").unwrap().title,
+            "Incipit (It Begins)"
+        );
         assert_eq!(world.find_lane("s0").unwrap().title, "Incipit (It Begins)");
+        assert!(world
+            .find_post("1.1.1/1.1.1/1.1.2")
+            .unwrap()
+            .1
+            .text
+            .starts_with("TTSM"));
         assert!(world.find_post("k1").unwrap().1.text.starts_with("TTSM"));
         assert_eq!(
             world.find_post("k5v1j4f4ds79m9t").unwrap().0.title,
@@ -998,16 +1026,17 @@ mod tests {
         let store = Store::open(&path).unwrap();
         let world = store.world();
         assert!(world.users.is_empty());
-        assert_eq!(world.threads.len(), 1);
+        assert_eq!(world.threads.len(), 2);
         assert_eq!(world.threads[0].title, seed::HALL);
         assert!(world.threads[0].messages.is_empty());
+        assert_eq!(world.threads[1].title, seed::PRIMER);
         assert!(!store.doc().contains("Mira"));
         let before = fs::read(&path).unwrap();
         let err = Store::init_empty(&path).unwrap_err();
         assert!(err.to_string().contains("never overwrites"), "{err}");
         assert_eq!(fs::read(&path).unwrap(), before);
 
-        let seeded = Store::open(temp_path()).unwrap();
+        let seeded = Store::open(demo_path()).unwrap();
         let seeded_path = seeded.path().to_path_buf();
         let _seeded = TempFile(seeded_path.clone());
         let demo = fs::read(&seeded_path).unwrap();
@@ -1016,6 +1045,59 @@ mod tests {
         assert!(err.to_string().contains("--seed"), "{err}");
         drop(seeded);
         assert_eq!(fs::read(&seeded_path).unwrap(), demo);
+    }
+
+    #[test]
+    fn a_missing_file_starts_with_the_primer_not_the_cast() {
+        let path = temp_path();
+        let _file = TempFile(path.clone());
+        assert!(!path.exists());
+        let store = Store::open(&path).unwrap();
+        assert!(path.exists());
+        let world = store.world();
+        assert!(world.users.is_empty());
+        assert!(!store.doc().contains("Mira"));
+        assert!(!store.doc().contains("Fern wall"));
+        let hall = world.thread(seed::HALL_THREAD).unwrap();
+        assert!(hall.messages.is_empty());
+        let primer = world.thread(seed::PRIMER_THREAD).unwrap();
+        assert_eq!(primer.title, seed::PRIMER);
+        assert!(primer.messages.len() >= 4);
+        assert!(primer
+            .messages
+            .iter()
+            .all(|m| m.author == seed::PRIMER_AUTHOR));
+        // The primer quotes its own addresses; they must be true.
+        let here = primer
+            .messages
+            .iter()
+            .find(|m| m.text.contains("This note lives at"))
+            .unwrap();
+        assert!(
+            here.text.contains(&crate::link::post_id(here.coord)),
+            "{}",
+            here.text
+        );
+        let links = primer
+            .messages
+            .iter()
+            .find(|m| m.text.starts_with("A link is just an address"))
+            .unwrap();
+        assert!(links
+            .text
+            .contains(&format!("/p/{}", crate::link::post_id(links.coord))));
+        assert!(links
+            .text
+            .contains(&format!("/l/{}", crate::link::lane_id(primer.coord))));
+
+        let before = fs::read(&path).unwrap();
+        drop(store);
+        let again = Store::open(&path).unwrap();
+        assert_eq!(
+            again.doc().as_bytes(),
+            before.as_slice(),
+            "reopening rewrote the file"
+        );
     }
 
     #[test]

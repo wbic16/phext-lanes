@@ -897,7 +897,7 @@ mod tests {
 
     #[test]
     fn hostile_next_urls_stay_on_the_site() {
-        assert_eq!(safe_next("/l/kcre66i9s"), "/l/kcre66i9s");
+        assert_eq!(safe_next("/l/1.2.1/1.1.1/1.1.1"), "/l/1.2.1/1.1.1/1.1.1");
         assert_eq!(safe_next("https://evil.example"), "/");
         assert_eq!(safe_next("//evil.example"), "/");
         assert_eq!(safe_next("/\\evil"), "/");

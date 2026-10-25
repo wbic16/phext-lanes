@@ -1,18 +1,19 @@
-//! Stable public ids for a thread (`/l/<id>`) and a message (`/p/<id>`).
+//! Public addresses for a thread (`/l/…`) and a message (`/p/…`).
 //!
-//! An id is a pure function of the phext coordinate. Nothing is written
-//! beside the scroll, so the same post keeps the same address after a
-//! restart, a redeploy, or a reseed of the demo. The encoding is frozen:
-//! a leading `k`, then the base-36 form of the address packed in base 1000.
-//! Lane ids use the six thread parts. Post ids use all nine, including the
-//! scroll. A section of ordinary text uses the same alphabet and radix with
-//! an `s` prefix and eight parts (the thread, plus chapter and section), so
-//! it never shares an id with a chat lane. Do not change the alphabet, the
-//! radix, or the `k` prefix.
+//! The address is the full nine-part phext coordinate, in canonical form.
+//! A chat thread is its card scroll (`/l/1.2.1/1.1.1/1.1.1`). A section of
+//! ordinary text is its first scroll (`/l/1.1.1/1.1.1/2.1.1`). A message is
+//! its own scroll (`/p/1.2.1/1.1.1/1.1.2`). Semicolons parse in place of
+//! slashes, and a six-part thread address (`1.2.1/1.1.1`) still parses, but
+//! the canonical form is always nine parts.
+//!
+//! Earlier builds packed the coordinate into a base-36 id (`k…`, `s…`).
+//! Those still parse, and [`canonical_lane`] / [`canonical_post`] turn them
+//! into the coordinate form so old links can redirect.
 
 use libphext::phext::Coordinate;
 
-use crate::coord::{parse_coord, section_anchor, thread_anchor};
+use crate::coord::{format_coord, parse_coord, section_anchor, thread_anchor};
 
 const PREFIX: char = 'k';
 const SECTION_PREFIX: char = 's';
@@ -20,36 +21,96 @@ const RADIX: u128 = 1000;
 const ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
 
 pub fn lane_id(coord: Coordinate) -> String {
-    encode(&lane_parts(coord)).expect("lane coordinate is in range")
+    format_coord(thread_anchor(coord))
 }
 
 pub fn post_id(coord: Coordinate) -> String {
-    encode(&post_parts(coord)).expect("post coordinate is in range")
+    format_coord(coord)
 }
 
-/// Stable id for one chapter and section. Prefix `s`, eight coordinate parts.
+/// Address of one chapter and section: the coordinate of its first scroll.
 pub fn section_lane_id(coord: Coordinate) -> String {
-    encode_prefixed(SECTION_PREFIX, &section_parts(coord)).expect("section coordinate is in range")
+    format_coord(section_anchor(coord))
 }
 
+/// A chat lane: the thread's card, `…/1.1.1`, or the six-part thread.
 pub fn parse_lane_id(id: &str) -> Option<Coordinate> {
+    if let Some(parts) = arms(id) {
+        let coord = match parts.len() {
+            2 => parse_coord(&format!("{}/{}/1.1.1", parts[0], parts[1])).ok()?,
+            3 => parse_coord(&parts.join("/")).ok()?,
+            _ => return None,
+        };
+        return Some(thread_anchor(coord));
+    }
     let parts = decode(id, 6)?;
     let coord = coord_from(&parts)?;
     Some(thread_anchor(coord))
 }
 
 pub fn parse_section_lane_id(id: &str) -> Option<Coordinate> {
+    if let Some(parts) = arms(id) {
+        if parts.len() != 3 {
+            return None;
+        }
+        return parse_coord(&parts.join("/")).ok().map(section_anchor);
+    }
     let parts = decode_prefixed(SECTION_PREFIX, id, 8)?;
     let coord = section_anchor(coord_from(&parts)?);
-    if section_lane_id(coord) != id {
+    if legacy_section_id(coord)? != id {
         return None;
     }
     Some(coord)
 }
 
 pub fn parse_post_id(id: &str) -> Option<Coordinate> {
+    if let Some(parts) = arms(id) {
+        if parts.len() != 3 {
+            return None;
+        }
+        return parse_coord(&parts.join("/")).ok();
+    }
     let parts = decode(id, 9)?;
     coord_from(&parts)
+}
+
+/// The canonical nine-part address for a lane id in any accepted form.
+pub fn canonical_lane(id: &str) -> Option<String> {
+    if let Some(coord) = parse_section_lane_id(id) {
+        return Some(section_lane_id(coord));
+    }
+    parse_lane_id(id).map(lane_id)
+}
+
+/// The canonical address for a post id in any accepted form.
+pub fn canonical_post(id: &str) -> Option<String> {
+    parse_post_id(id).map(post_id)
+}
+
+/// `1.2.1/1.1.1` or `1.2.1;1.1.1;1.1.2` split into its dotted arms.
+/// None when the text is not shaped like a coordinate at all.
+fn arms(id: &str) -> Option<Vec<&str>> {
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '/' | ';'))
+    {
+        return None;
+    }
+    let parts: Vec<&str> = id.split(['/', ';']).collect();
+    let shaped = parts.iter().all(|arm| {
+        let nums: Vec<&str> = arm.split('.').collect();
+        nums.len() == 3 && nums.iter().all(|n| !n.is_empty())
+    });
+    if shaped {
+        Some(parts)
+    } else {
+        Some(Vec::new())
+    }
+}
+
+fn legacy_section_id(coord: Coordinate) -> Option<String> {
+    encode_prefixed(SECTION_PREFIX, &section_parts(coord))
 }
 
 fn lane_parts(coord: Coordinate) -> [usize; 6] {
@@ -77,21 +138,23 @@ fn section_parts(coord: Coordinate) -> [usize; 8] {
     ]
 }
 
+#[cfg(test)]
 fn post_parts(coord: Coordinate) -> [usize; 9] {
-    let lane = lane_parts(coord);
+    let section = section_parts(coord);
     [
-        lane[0],
-        lane[1],
-        lane[2],
-        lane[3],
-        lane[4],
-        lane[5],
-        coord.x.chapter,
-        coord.x.section,
+        section[0],
+        section[1],
+        section[2],
+        section[3],
+        section[4],
+        section[5],
+        section[6],
+        section[7],
         coord.x.scroll,
     ]
 }
 
+#[cfg(test)]
 fn encode(parts: &[usize]) -> Option<String> {
     encode_prefixed(PREFIX, parts)
 }
@@ -190,24 +253,84 @@ mod tests {
     }
 
     #[test]
-    fn known_coordinates_keep_these_ids() {
-        assert_eq!(lane_id(at("1.1.1/1.1.1/1.1.1")), "k0");
-        assert_eq!(lane_id(at("1.2.1/1.1.1/9.9.9")), "kcre66i9s");
-        assert_eq!(lane_id(at("1.2.1/1.2.1/1.1.1")), "kcre66j1k");
-        assert_eq!(post_id(at("1.1.1/1.1.1/1.1.2")), "k1");
-        assert_eq!(post_id(at("1.2.1/1.1.1/1.1.2")), "k5v1j4f4ds79m9t");
-        assert_eq!(section_lane_id(at("1.1.1/1.1.1/1.1.1")), "s0");
+    fn addresses_are_canonical_coordinates() {
+        assert_eq!(lane_id(at("1.1.1/1.1.1/1.1.1")), "1.1.1/1.1.1/1.1.1");
+        assert_eq!(lane_id(at("1.2.1/1.1.1/9.9.9")), "1.2.1/1.1.1/1.1.1");
+        assert_eq!(lane_id(at("1.2.1/1.2.1/1.1.1")), "1.2.1/1.2.1/1.1.1");
+        assert_eq!(post_id(at("1.1.1/1.1.1/1.1.2")), "1.1.1/1.1.1/1.1.2");
+        assert_eq!(post_id(at("1.2.1/1.1.1/1.1.2")), "1.2.1/1.1.1/1.1.2");
+        assert_eq!(
+            section_lane_id(at("1.1.1/1.1.1/1.1.1")),
+            "1.1.1/1.1.1/1.1.1"
+        );
+        assert_eq!(
+            section_lane_id(at("1.1.1/1.1.1/2.3.7")),
+            "1.1.1/1.1.1/2.3.1"
+        );
     }
 
     #[test]
-    fn section_ids_roundtrip_without_taking_a_chat_lane() {
+    fn semicolons_parse_and_canonicalize() {
+        assert_eq!(
+            parse_post_id("1.2.1;1.1.1;1.1.2"),
+            Some(at("1.2.1/1.1.1/1.1.2"))
+        );
+        assert_eq!(
+            canonical_lane("1.2.1;1.1.1").as_deref(),
+            Some("1.2.1/1.1.1/1.1.1")
+        );
+        assert_eq!(
+            canonical_post("1.2.1;1.1.1;1.1.2").as_deref(),
+            Some("1.2.1/1.1.1/1.1.2")
+        );
+        assert_eq!(
+            canonical_lane("1.1.1/1.1.1/2.1.5").as_deref(),
+            Some("1.1.1/1.1.1/2.1.1")
+        );
+    }
+
+    #[test]
+    fn legacy_ids_still_resolve_to_the_same_coordinates() {
+        assert_eq!(parse_lane_id("k0"), Some(at("1.1.1/1.1.1/1.1.1")));
+        assert_eq!(parse_lane_id("kcre66i9s"), Some(at("1.2.1/1.1.1/1.1.1")));
+        assert_eq!(parse_lane_id("kcre66j1k"), Some(at("1.2.1/1.2.1/1.1.1")));
+        assert_eq!(parse_post_id("k1"), Some(at("1.1.1/1.1.1/1.1.2")));
+        assert_eq!(
+            parse_post_id("k5v1j4f4ds79m9t"),
+            Some(at("1.2.1/1.1.1/1.1.2"))
+        );
+        assert_eq!(parse_section_lane_id("s0"), Some(at("1.1.1/1.1.1/1.1.1")));
+        assert_eq!(
+            canonical_lane("kcre66i9s").as_deref(),
+            Some("1.2.1/1.1.1/1.1.1")
+        );
+        assert_eq!(
+            canonical_lane("1.2.1/1.1.1").as_deref(),
+            Some("1.2.1/1.1.1/1.1.1")
+        );
+        assert_eq!(canonical_lane("s0").as_deref(), Some("1.1.1/1.1.1/1.1.1"));
+        assert_eq!(
+            canonical_post("k5v1j4f4ds79m9t").as_deref(),
+            Some("1.2.1/1.1.1/1.1.2")
+        );
+        let fern = at("1.2.1/1.1.1/1.1.4");
+        assert_eq!(
+            encode(&post_parts(fern)).and_then(|id| parse_post_id(&id)),
+            Some(fern)
+        );
+    }
+
+    #[test]
+    fn section_ids_roundtrip_and_every_address_is_nine_parts() {
         let fern = at("1.2.1/1.1.1/1.1.1");
         let section = section_lane_id(fern);
-        assert_ne!(section, lane_id(fern));
+        assert_eq!(section, lane_id(fern), "both are the card scroll");
         assert_eq!(parse_section_lane_id(&section), Some(section_anchor(fern)));
+        assert!(parse_section_lane_id("1.2.1/1.1.1").is_none());
         assert!(parse_section_lane_id("kcre66i9s").is_none());
         assert!(parse_section_lane_id("k0").is_none());
         assert!(parse_lane_id("s0").is_none());
+        assert_eq!(parse_lane_id("1.2.1/1.1.1/1.1.4"), Some(fern));
         let chapter = at("1.1.1/1.1.1/2.1.3");
         let id = section_lane_id(chapter);
         let parsed = parse_section_lane_id(&id).unwrap();
@@ -215,6 +338,7 @@ mod tests {
         assert_eq!(parsed.x.section, 1);
         assert_eq!(parsed.x.scroll, 1);
         assert_ne!(id, lane_id(chapter));
+        assert_eq!(lane_id(chapter), "1.1.1/1.1.1/1.1.1");
     }
 
     #[test]
@@ -234,14 +358,14 @@ mod tests {
         assert!(parse_lane_id("0").is_none());
         assert!(parse_lane_id("K0").is_none());
         assert!(parse_lane_id("k00").is_none());
-        assert!(parse_post_id("k5v1j4f4ds79m9t/").is_none());
         assert!(parse_lane_id("nope").is_none());
-        assert!(parse_lane_id(&post_id(at("1.2.1/1.1.1/1.1.2"))).is_none());
-        assert_eq!(
-            parse_post_id("k0").map(|coord| coord.x.scroll),
-            Some(1),
-            "the card slot shares the lane's packed number"
-        );
+        assert!(parse_lane_id("1.2/1.1.1").is_none());
+        assert!(parse_lane_id("0.1.1/1.1.1").is_none());
+        assert!(parse_lane_id("1.1.1//1.1.1").is_none());
+        assert!(parse_post_id("1.2.1/1.1.1/1.1.2/").is_none());
+        assert!(parse_post_id("1.2.1/1.1.1").is_none());
+        assert!(parse_post_id("k5v1j4f4ds79m9t/").is_none());
+        assert!(parse_post_id("1001.1.1/1.1.1/1.1.2").is_none());
     }
 
     #[test]
@@ -259,13 +383,13 @@ mod tests {
             .iter()
             .find(|thread| thread.title == seed::FERN)
             .unwrap();
-        assert_eq!(lane_id(fern.coord), "kcre66i9s");
+        assert_eq!(lane_id(fern.coord), format!("{}/1.1.1", seed::FERN_THREAD));
         let opening = fern
             .messages
             .iter()
             .find(|message| message.text.contains("north-wall ferns"))
             .unwrap();
-        assert_eq!(post_id(opening.coord), "k5v1j4f4ds79m9t");
+        assert_eq!(post_id(opening.coord), "1.2.1/1.1.1/1.1.2");
         assert_eq!(opening.coord.x.scroll, 2);
     }
 

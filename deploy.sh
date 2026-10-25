@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Deploy Lanes and reverse-proxy mc.phext.io with the nginx already on this host.
 # Idempotent: run it again to rebuild exo and restart. Chat data lives in
-# DATA_DIR, outside the git checkout, and is seeded only when missing.
+# DATA_DIR, outside the git checkout, and is created only when missing.
 #
 #   curl -fsSL https://raw.githubusercontent.com/wbic16/phext-lanes/exo/deploy.sh | bash
 #   bash deploy.sh [--no-tls] [--user ubuntu] [--branch exo] [--port 7841]
@@ -38,8 +38,9 @@ Usage: deploy.sh [--branch NAME] [--port PORT] [--domain NAME]
   DATA_DIR      phext directory kept across redeploys (default /var/lib/phext-lanes)
   SERVICE_USER  systemd user (default: the user running this script)
   --no-tls      do not run certbot
-  --empty       create chat.phext with a General thread and no demo cast,
-                only when that file is missing. Never deletes or replaces
+  --empty       create chat.phext now (General and the phext primer, no
+                demo cast) instead of on first start, only when that
+                file is missing. Never deletes or replaces
                 an existing chat.phext. Move the file aside yourself first
                 if you mean to start over.
 
@@ -466,11 +467,11 @@ EOF
     fi
   elif [[ "$EMPTY" == "1" ]]; then
     sudo -u "$SERVICE_USER" "${APP_DIR}/target/release/lanes" --empty --file "$data_file"
-    printf 'Created an empty chat at %s (General only, no demo cast).\n' "$data_file"
+    printf 'Created a new chat at %s (General and the phext primer, no demo cast).\n' "$data_file"
     printf 'An existing chat.phext is never replaced by --empty or by a later deploy.\n'
   else
-    printf 'No chat file at %s yet. The first start seeds the demo, and later deploys leave it in place.\n' "$data_file"
-    printf 'Pass --empty on the first deploy for a real chat with no demo cast.\n'
+    printf 'No chat file at %s yet. The first start writes General and the phext primer, and later deploys leave it in place.\n' "$data_file"
+    printf 'A deploy never writes the demo cast. Run lanes --seed yourself if you want it.\n'
   fi
 
   local dump

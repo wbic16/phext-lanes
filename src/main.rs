@@ -40,7 +40,7 @@ struct Cli {
     #[arg(long, global = true)]
     seed: bool,
 
-    /// Create a new chat with a General thread and no demo cast.
+    /// Create a new chat with General and the phext primer, and no demo cast.
     /// Refuses to replace a file that already has content.
     #[arg(long, global = true)]
     empty: bool,
@@ -144,7 +144,7 @@ async fn run() -> Result<(), Error> {
     if cli.empty {
         Store::init_empty(&settings.file)?;
         println!(
-            "created {} with a General thread and no demo cast.",
+            "created {} with General and the phext primer, and no demo cast.",
             settings.file.display()
         );
         println!("--empty does not replace a chat that already exists.");

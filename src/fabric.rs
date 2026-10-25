@@ -136,23 +136,42 @@ pub fn parse_route(path: &str) -> Result<ParsedRoute, RouteError> {
 fn parse_tail(path: &str) -> Result<Route, RouteError> {
     if let Some(id) = path.strip_prefix("l/") {
         if let Some(id) = id.strip_suffix("/chat.phext") {
-            return one_segment(id).map(|id| Route::Download { lane: Some(id) });
+            return address(id).map(|id| Route::Download { lane: Some(id) });
         }
-        return one_segment(id).map(Route::Lane);
+        return address(id).map(Route::Lane);
     }
     if let Some(id) = path.strip_prefix("p/") {
-        return one_segment(id).map(Route::Post);
+        return address(id).map(Route::Post);
     }
     if let Some(id) = path.strip_prefix("api/l/") {
-        return one_segment(id).map(Route::ApiLane);
+        return address(id).map(Route::ApiLane);
     }
     if let Some(id) = path.strip_prefix("api/p/") {
-        return one_segment(id).map(Route::ApiPost);
+        return address(id).map(Route::ApiPost);
     }
     if let Some(token) = path.strip_prefix("join/") {
         return one_segment(token).map(Route::Join);
     }
     Err(RouteError::Unknown)
+}
+
+/// A lane or post address: a coordinate such as `1.2.1/1.1.1/1.1.2`
+/// (slashes, semicolons, or their percent escapes), or one legacy id segment.
+fn address(id: &str) -> Result<String, RouteError> {
+    let id = id
+        .replace("%2F", "/")
+        .replace("%2f", "/")
+        .replace("%3B", ";")
+        .replace("%3b", ";");
+    let coordinate = !id.is_empty()
+        && id
+            .chars()
+            .all(|ch| ch.is_ascii_digit() || matches!(ch, '.' | '/' | ';'));
+    if coordinate {
+        Ok(id)
+    } else {
+        one_segment(&id)
+    }
 }
 
 fn one_segment(id: &str) -> Result<String, RouteError> {
@@ -555,24 +574,24 @@ mod tests {
     #[test]
     fn routes_keep_the_default_permalinks_and_add_a_fabric_prefix() {
         assert_eq!(
-            parse_route("/l/kcre66i9s").unwrap(),
+            parse_route("/l/1.2.1/1.1.1/1.1.1").unwrap(),
             ParsedRoute {
                 fabric: None,
-                route: Route::Lane("kcre66i9s".into()),
+                route: Route::Lane("1.2.1/1.1.1/1.1.1".into()),
             }
         );
         assert_eq!(
-            parse_route("/p/k5v1j4f4ds79m9t").unwrap(),
+            parse_route("/p/1.2.1/1.1.1/1.1.2").unwrap(),
             ParsedRoute {
                 fabric: None,
-                route: Route::Post("k5v1j4f4ds79m9t".into()),
+                route: Route::Post("1.2.1/1.1.1/1.1.2".into()),
             }
         );
         assert_eq!(
-            parse_route("/f/notes/l/kcre66i9s").unwrap(),
+            parse_route("/f/notes/l/1.2.1/1.1.1/1.1.1").unwrap(),
             ParsedRoute {
                 fabric: Some("notes".into()),
-                route: Route::Lane("kcre66i9s".into()),
+                route: Route::Lane("1.2.1/1.1.1/1.1.1".into()),
             }
         );
         assert_eq!(
@@ -580,7 +599,7 @@ mod tests {
             Route::Download { lane: None }
         );
         assert!(matches!(
-            parse_route("/l/kcre66i9s/chat.phext").unwrap().route,
+            parse_route("/l/1.2.1/1.1.1/chat.phext").unwrap().route,
             Route::Download { lane: Some(_) }
         ));
         assert_eq!(parse_route("/f/../x"), Err(RouteError::BadFabric));
@@ -618,13 +637,13 @@ mod tests {
         let lane = lane_document(&doc, fern);
         assert!(lane.contains("north-wall ferns"));
         assert!(!lane.contains("starter is slow"));
-        assert_eq!(lane_id(fern.coord), "kcre66i9s");
+        assert_eq!(lane_id(fern.coord), "1.2.1/1.1.1/1.1.1");
         let opening = fern
             .messages
             .iter()
             .find(|message| message.text.contains("north-wall ferns"))
             .unwrap();
-        assert_eq!(post_id(opening.coord), "k5v1j4f4ds79m9t");
+        assert_eq!(post_id(opening.coord), "1.2.1/1.1.1/1.1.2");
         let _ = parse_coord("1.2.1/1.1.1/1.1.2").unwrap();
     }
 

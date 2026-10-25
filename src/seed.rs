@@ -191,16 +191,50 @@ pub fn readers() -> Vec<User> {
         .collect()
 }
 
-/// A new chat: one General thread, no readers, no messages.
+pub const PRIMER: &str = "How phext works";
+pub const PRIMER_THREAD: &str = "1.1.1/1.1.2";
+pub const PRIMER_AUTHOR: &str = "Lanes";
+
+/// The primer, one scroll per note. They land at `1.1.1/1.1.2/1.1.2` onward,
+/// and the coordinates quoted inside them are their own addresses.
+const PRIMER_NOTES: &[&str] = &[
+    "Phext is plain text with eleven dimensions. Inside a scroll, lines and columns work as usual. Nine more break characters stack scrolls into sections, chapters, books, volumes, collections, series, shelves, and libraries. This whole chat is one .phext file, and fork downloads it.",
+    "Every scroll has a nine-number address in three groups: library.shelf.series / collection.volume.book / chapter.section.scroll. Each number runs from 1 to 1000. This note lives at 1.1.1/1.1.2/1.1.3.",
+    "In Lanes the first group is the topic, the second is the thread, and the third is the scroll inside the thread. Scroll 1.1.1 of a thread is its card, so the card's address names the whole thread: General is 1.1.1/1.1.1/1.1.1, and this primer is 1.1.1/1.1.2/1.1.1. Notes follow at 1.1.2, 1.1.3, and so on.",
+    "A link is just an address, always all nine numbers. /l/1.1.1/1.1.2/1.1.1 opens this thread. /p/1.1.1/1.1.2/1.1.5 opens this note. Type an address into a message and it turns into a link: a card like 1.1.1/1.1.1/1.1.1 opens that thread, and any other scroll, like 1.1.1/1.1.2/1.1.2, opens that note. The link button next to any note copies its address. Semicolons work in place of slashes: 1.1.1;1.1.2;1.1.2.",
+    "Lanes guesses where a new message belongs from its words. The box says where it will go, and change picks another thread. Writing to an address nobody has used yet starts a new thread there, for example lanes post --coord 2.1.1/1.1.1/1.1.1 --text \"Workshop notes\".",
+];
+
+/// A new chat: a General thread and the phext primer. No readers.
 ///
 /// This does not include the fictional cast. [`document`] does.
-pub fn blank() -> String {
-    let anchor = parse_coord(&format!("{HALL_THREAD}/1.1.1")).expect("general");
-    phext::insert(
+pub fn blank(now: DateTime<Utc>) -> String {
+    let hall = parse_coord(&format!("{HALL_THREAD}/1.1.1")).expect("general");
+    let mut doc = phext::insert(
         String::new(),
-        anchor,
+        hall,
         &model::format_card("General", HALL, "general"),
-    )
+    );
+    let primer = parse_coord(&format!("{PRIMER_THREAD}/1.1.1")).expect("primer");
+    doc = phext::insert(
+        doc,
+        primer,
+        &model::format_card(
+            "General",
+            PRIMER,
+            "phext coordinate link address scroll thread primer help",
+        ),
+    );
+    let count = PRIMER_NOTES.len() as i64;
+    for (offset, text) in PRIMER_NOTES.iter().enumerate() {
+        let ts = now - Duration::minutes(count - offset as i64);
+        doc = phext::insert(
+            doc,
+            coord::with_scroll(primer, offset + 2),
+            &model::format_message(PRIMER_AUTHOR, ts, text),
+        );
+    }
+    doc
 }
 
 /// Build the demo phext by inserting each scroll in coordinate order.

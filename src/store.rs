@@ -28,10 +28,18 @@ pub struct World {
 impl World {
     pub fn find_user(&self, query: &str) -> Option<&User> {
         let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
         let lower = trimmed.to_lowercase();
         self.users
             .iter()
-            .find(|user| user.id == lower || user.name.eq_ignore_ascii_case(trimmed))
+            .find(|user| user.id == trimmed || user.id == lower)
+            .or_else(|| {
+                self.users
+                    .iter()
+                    .find(|user| user.name.eq_ignore_ascii_case(trimmed))
+            })
     }
 
     pub fn thread(&self, key: &str) -> Option<&Thread> {
@@ -231,6 +239,95 @@ impl Store {
         self.persist(seed::document(now))
     }
 
+    /// Create a chat with a General thread and no demo cast.
+    ///
+    /// A file that already has content is left untouched. `--seed` is the
+    /// only path that replaces an existing chat, and it wipes that file.
+    pub fn init_empty(path: impl AsRef<Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        if path.exists() && fs::metadata(path)?.len() > 0 {
+            return Err(Error::Bad(format!(
+                "refusing to replace {}. --empty never overwrites a chat that already has content. Move the file aside yourself if you mean to start over. --seed is the only flag that replaces a chat, and it wipes the file back to the demo cast.",
+                path.display()
+            )));
+        }
+        let mut store = Store::from_doc(path.to_path_buf(), String::new());
+        store.persist(seed::blank())
+    }
+
+    /// Add a reader, or refresh their display name. Interests start empty.
+    ///
+    /// Returns true when the roster scroll was created.
+    pub fn ensure_member(&mut self, id: &str, name: &str) -> Result<bool, Error> {
+        let id = model::member_id(id);
+        if !crate::oauth::valid_who(&id) {
+            return Err(Error::Bad("member id is not a sign-in".into()));
+        }
+        let mut name = coord::one_line(name);
+        if name.chars().count() > 80 {
+            name = name.chars().take(80).collect();
+        }
+        if name.is_empty() {
+            name = "reader".to_string();
+        }
+        if let Some(existing) = self.world.users.iter().find(|user| user.id == id).cloned() {
+            if existing.name == name {
+                return Ok(false);
+            }
+            let Some(coord) = self.roster_coord(&id) else {
+                return Ok(false);
+            };
+            let mut user = existing;
+            user.name = name;
+            let mut doc = self.doc.clone();
+            doc = phext::insert(doc, coord, &user.to_scroll());
+            self.persist(doc)?;
+            return Ok(false);
+        }
+        let coord = self.next_roster()?;
+        let user = User {
+            id,
+            name,
+            blurb: String::new(),
+            interests: Vec::new(),
+        };
+        let mut doc = self.doc.clone();
+        doc = phext::insert(doc, coord, &user.to_scroll());
+        self.persist(doc)?;
+        Ok(true)
+    }
+
+    /// Remember a thread this member posted in or opened.
+    ///
+    /// The feed still uses the existing distance ranking. No interests means
+    /// every thread is equally near, so a new member sees recency until this
+    /// list grows. The first thread stays their home shelf.
+    pub fn note_interest(&mut self, id: &str, thread: Coordinate) -> Result<(), Error> {
+        let anchor = thread_anchor(thread);
+        let Some(existing) = self.world.users.iter().find(|user| user.id == id).cloned() else {
+            return Ok(());
+        };
+        if existing
+            .interests
+            .iter()
+            .any(|coord| thread_key(*coord) == thread_key(anchor))
+        {
+            return Ok(());
+        }
+        let Some(at) = self.roster_coord(id) else {
+            return Ok(());
+        };
+        let mut user = existing;
+        user.interests.push(anchor);
+        if user.interests.len() > 8 {
+            user.interests.remove(1);
+        }
+        let mut doc = self.doc.clone();
+        doc = phext::insert(doc, at, &user.to_scroll());
+        self.persist(doc)?;
+        Ok(())
+    }
+
     pub fn place(&mut self, post: Post) -> Result<Placed, Error> {
         let author = coord::one_line(&post.author);
         if author.is_empty() || author.chars().count() > 80 {
@@ -305,6 +402,30 @@ impl Store {
             topic,
             new_thread,
         })
+    }
+
+    fn roster_coord(&self, id: &str) -> Option<Coordinate> {
+        self.filled.iter().copied().find(|coord| {
+            if !is_roster(*coord) {
+                return false;
+            }
+            match model::parse_scroll(&phext::fetch(&self.doc, *coord)) {
+                Some(Scroll::User(user)) => user.id == id,
+                _ => false,
+            }
+        })
+    }
+
+    fn next_roster(&self) -> Result<Coordinate, Error> {
+        let mut coord = phext::default_coordinate();
+        coord.z.library = coord::ROSTER_LIBRARY;
+        for scroll in 1..=phext::COORDINATE_MAXIMUM {
+            coord.x.scroll = scroll;
+            if !self.filled.contains(&coord) {
+                return Ok(coord);
+            }
+        }
+        Err(Error::Bad("the roster is full".into()))
     }
 
     fn persist(&mut self, doc: String) -> Result<(), Error> {
@@ -867,5 +988,62 @@ mod tests {
             world.find_post("k5v1j4f4ds79m9t").unwrap().0.title,
             "Fern wall"
         );
+    }
+
+    #[test]
+    fn empty_start_creates_general_and_refuses_to_wipe() {
+        let path = temp_path();
+        let _file = TempFile(path.clone());
+        Store::init_empty(&path).unwrap();
+        let store = Store::open(&path).unwrap();
+        let world = store.world();
+        assert!(world.users.is_empty());
+        assert_eq!(world.threads.len(), 1);
+        assert_eq!(world.threads[0].title, seed::HALL);
+        assert!(world.threads[0].messages.is_empty());
+        assert!(!store.doc().contains("Mira"));
+        let before = fs::read(&path).unwrap();
+        let err = Store::init_empty(&path).unwrap_err();
+        assert!(err.to_string().contains("never overwrites"), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), before);
+
+        let seeded = Store::open(temp_path()).unwrap();
+        let seeded_path = seeded.path().to_path_buf();
+        let _seeded = TempFile(seeded_path.clone());
+        let demo = fs::read(&seeded_path).unwrap();
+        assert!(demo.windows(4).any(|bytes| bytes == b"Mira") || seeded.doc().contains("Mira"));
+        let err = Store::init_empty(&seeded_path).unwrap_err();
+        assert!(err.to_string().contains("--seed"), "{err}");
+        drop(seeded);
+        assert_eq!(fs::read(&seeded_path).unwrap(), demo);
+    }
+
+    #[test]
+    fn oauth_profile_becomes_a_roster_scroll_and_interests_follow_use() {
+        let path = temp_path();
+        let _file = TempFile(path.clone());
+        Store::init_empty(&path).unwrap();
+        let mut store = Store::open(&path).unwrap();
+        assert!(store.ensure_member("github:100", "The Octocat").unwrap());
+        assert!(!store.ensure_member("github:100", "The Octocat").unwrap());
+        let user = store.world().find_user("github:100").unwrap();
+        assert_eq!(user.name, "The Octocat");
+        assert!(user.interests.is_empty());
+        assert!(user.blurb.is_empty());
+        let raw = store.doc().to_string();
+        assert!(raw.contains("id: github:100"));
+        assert!(raw.contains("name: The Octocat"));
+
+        let general = store.world().threads[0].coord;
+        store.note_interest("github:100", general).unwrap();
+        store.note_interest("github:100", general).unwrap();
+        let user = store.world().find_user("The Octocat").unwrap();
+        assert_eq!(user.interests.len(), 1);
+        assert_eq!(thread_key(user.interests[0]), seed::HALL_THREAD);
+
+        store.ensure_member("github:100", "Octo Cat").unwrap();
+        let user = store.world().find_user("github:100").unwrap();
+        assert_eq!(user.name, "Octo Cat");
+        assert_eq!(user.interests.len(), 1);
     }
 }

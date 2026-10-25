@@ -19,6 +19,7 @@ APP_DIR="${APP_DIR:-${HOME}/phext-lanes}"
 DATA_DIR="${DATA_DIR:-/var/lib/phext-lanes}"
 SERVICE_USER="${SERVICE_USER:-}"
 NO_TLS="${NO_TLS:-0}"
+EMPTY="${EMPTY:-0}"
 
 REPO="https://github.com/wbic16/phext-lanes.git"
 SERVICE="phext-lanes.service"
@@ -28,6 +29,7 @@ usage() {
   cat <<'EOF'
 Usage: deploy.sh [--branch NAME] [--port PORT] [--domain NAME]
                  [--app-dir DIR] [--data-dir DIR] [--user NAME] [--no-tls]
+                 [--empty]
 
   BRANCH        git branch to deploy (default exo)
   PORT          localhost port (default 7841)
@@ -36,6 +38,10 @@ Usage: deploy.sh [--branch NAME] [--port PORT] [--domain NAME]
   DATA_DIR      phext directory kept across redeploys (default /var/lib/phext-lanes)
   SERVICE_USER  systemd user (default: the user running this script)
   --no-tls      do not run certbot
+  --empty       create chat.phext with a General thread and no demo cast,
+                only when that file is missing. Never deletes or replaces
+                an existing chat.phext. Move the file aside yourself first
+                if you mean to start over.
 
 Run as the account that should own the service (ubuntu or wbic16). The
 script uses sudo for apt, systemd, and nginx. It only writes
@@ -277,6 +283,10 @@ main() {
         NO_TLS=1
         shift
         ;;
+      --empty)
+        EMPTY=1
+        shift
+        ;;
       -h | --help)
         usage
         exit 0
@@ -426,10 +436,41 @@ EOF
     sudo chmod 600 "$oauth_file"
     printf 'Wrote %s (session secret not printed). Fill in the GitHub and Google client lines.\n' "$oauth_file"
   fi
+  local owners_file="/etc/phext-lanes/owners.env"
+  if sudo test -f "$owners_file"; then
+    printf 'Keeping %s\n' "$owners_file"
+  else
+    local owners_tmp
+    old_umask=$(umask)
+    umask 077
+    owners_tmp=$(mktemp)
+    cat >"$owners_tmp" <<'EOF'
+# Who may administer this chat. Comma-separated provider:id or email.
+# Example: LANES_OWNERS=github:12345,stewart@example.com
+# Leave the value empty to keep the public demo.
+LANES_OWNERS=
+EOF
+    umask "$old_umask"
+    sudo mkdir -p /etc/phext-lanes
+    sudo cp "$owners_tmp" "$owners_file"
+    rm -f "$owners_tmp"
+    sudo chown root:root "$owners_file"
+    sudo chmod 600 "$owners_file"
+    printf 'Wrote %s (mode 0600). Fill in LANES_OWNERS before inviting anyone.\n' "$owners_file"
+  fi
   if [[ -s "$data_file" ]]; then
     printf 'Keeping existing chat data at %s\n' "$data_file"
+    if [[ "$EMPTY" == "1" ]]; then
+      printf 'WARNING: --empty was set, but %s already exists and was NOT replaced.\n' "$data_file" >&2
+      printf '         --empty never wipes a chat. Move the file aside yourself if you mean to start over, then run deploy.sh --empty again.\n' >&2
+    fi
+  elif [[ "$EMPTY" == "1" ]]; then
+    sudo -u "$SERVICE_USER" "${APP_DIR}/target/release/lanes" --empty --file "$data_file"
+    printf 'Created an empty chat at %s (General only, no demo cast).\n' "$data_file"
+    printf 'An existing chat.phext is never replaced by --empty or by a later deploy.\n'
   else
     printf 'No chat file at %s yet. The first start seeds the demo, and later deploys leave it in place.\n' "$data_file"
+    printf 'Pass --empty on the first deploy for a real chat with no demo cast.\n'
   fi
 
   local dump
@@ -458,6 +499,7 @@ Environment=LANES_FILE=${data_file}
 Environment=LANES_PUBLIC_ORIGIN=https://${DOMAIN}
 EnvironmentFile=-/etc/phext-lanes/oauth.env
 EnvironmentFile=-/etc/phext-lanes/admin.env
+EnvironmentFile=-/etc/phext-lanes/owners.env
 ExecStart=${APP_DIR}/target/release/lanes --host 127.0.0.1 --port ${PORT} --file ${data_file}
 Restart=on-failure
 RestartSec=2
@@ -731,6 +773,8 @@ EOF
   printf '  data:       %s\n' "$data_file"
   printf '  fabrics:    %s\n' "$fabrics_dir"
   printf '  admin:      %s\n' "$token_file"
+  printf '  owners:     /etc/phext-lanes/owners.env\n'
+  printf '  invites:    %s/invites.json (created by lanes invite; mode 0600)\n' "$DATA_DIR"
   printf '  nginx:      %s (%s)\n' "$available" "$nginx_state"
   printf '  nginx -t:   ok\n'
   printf '  local:      %s\n' "$local_code"

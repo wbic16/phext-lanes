@@ -70,6 +70,8 @@ pub enum Route {
     AuthStart(String),
     AuthCallback(String),
     Logout,
+    Join(String),
+    JoinBack,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +127,7 @@ pub fn parse_route(path: &str) -> Result<ParsedRoute, RouteError> {
         "auth/github/callback" => Route::AuthCallback("github".into()),
         "auth/google/callback" => Route::AuthCallback("google".into()),
         "auth/logout" => Route::Logout,
+        "join/back" => Route::JoinBack,
         other => parse_tail(other)?,
     };
     Ok(ParsedRoute { fabric, route })
@@ -145,6 +148,9 @@ fn parse_tail(path: &str) -> Result<Route, RouteError> {
     }
     if let Some(id) = path.strip_prefix("api/p/") {
         return one_segment(id).map(Route::ApiPost);
+    }
+    if let Some(token) = path.strip_prefix("join/") {
+        return one_segment(token).map(Route::Join);
     }
     Err(RouteError::Unknown)
 }

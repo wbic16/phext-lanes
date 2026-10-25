@@ -2,3 +2,5 @@
 *.phext.tmp
 data/*.phext
 data/*.tmp
+data/invites.json
+invites.json

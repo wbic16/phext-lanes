@@ -28,6 +28,8 @@ type HmacSha256 = Hmac<Sha256>;
 pub struct Identity {
     pub who: String,
     pub handle: String,
+    pub name: String,
+    pub email: String,
 }
 
 pub trait IdentitySource: Send + Sync {
@@ -67,6 +69,8 @@ impl std::fmt::Debug for Oauth {
 pub struct Session {
     pub who: String,
     pub handle: String,
+    pub name: String,
+    pub email: String,
     pub csrf: String,
 }
 
@@ -74,6 +78,10 @@ pub struct Session {
 struct SessionBody {
     who: String,
     handle: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    email: String,
     csrf: String,
     exp: i64,
 }
@@ -137,10 +145,14 @@ impl IdentitySource for ScriptedSource {
             "github" => Ok(Identity {
                 who: "github:100".into(),
                 handle: "octocat".into(),
+                name: "The Octocat".into(),
+                email: "octo@example.com".into(),
             }),
             "google" => Ok(Identity {
                 who: "google:sub-1".into(),
                 handle: "ada".into(),
+                name: "Ada Example".into(),
+                email: "ada@example.com".into(),
             }),
             _ => Err("the provider did not complete sign-in.".into()),
         }
@@ -181,6 +193,7 @@ impl Oauth {
         Self::from_parts("", "", false, "", "", "", "", Arc::new(ScriptedSource))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_parts(
         origin: &str,
         session_secret: &str,
@@ -304,9 +317,13 @@ impl Oauth {
             return Err("Sign-in did not complete.".into());
         }
         let csrf = random_token(16)?;
+        let name = display_name(&identity.name, &identity.handle);
+        let email = clean_email(&identity.email);
         let session = self.seal(&SessionBody {
             who: identity.who.clone(),
             handle: identity.handle.clone(),
+            name,
+            email,
             csrf,
             exp: Utc::now().timestamp() + SESSION_TTL,
         })?;
@@ -328,7 +345,9 @@ impl Oauth {
         }
         Some(Session {
             who: body.who,
-            handle,
+            handle: handle.clone(),
+            name: display_name(&body.name, &handle),
+            email: clean_email(&body.email),
             csrf: body.csrf,
         })
     }
@@ -343,6 +362,8 @@ impl Oauth {
             .seal(&SessionBody {
                 who: "github:100".into(),
                 handle: "octocat".into(),
+                name: "The Octocat".into(),
+                email: "octo@example.com".into(),
                 csrf: TEST_CSRF.into(),
                 exp: Utc::now().timestamp() + 3600,
             })
@@ -492,6 +513,43 @@ pub(crate) fn valid_who(who: &str) -> bool {
         }
 }
 
+pub fn display_name(raw: &str, fallback: &str) -> String {
+    let flat = crate::coord::one_line(raw);
+    let name: String = flat.chars().take(80).collect();
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        let fallback = fallback.trim();
+        if fallback.is_empty() {
+            "reader".into()
+        } else {
+            fallback.to_string()
+        }
+    } else {
+        name
+    }
+}
+
+pub fn clean_email(raw: &str) -> String {
+    let email = raw.trim().to_lowercase();
+    if !(3..=120).contains(&email.len()) {
+        return String::new();
+    }
+    let Some((local, host)) = email.split_once('@') else {
+        return String::new();
+    };
+    if local.is_empty()
+        || host.is_empty()
+        || !host.contains('.')
+        || email.contains(':')
+        || !email
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '@' | '.' | '-' | '_' | '+'))
+    {
+        return String::new();
+    }
+    email
+}
+
 pub fn clean_handle(raw: &str) -> String {
     let mut out = String::new();
     for ch in raw.chars() {
@@ -541,7 +599,7 @@ fn verify(secret: &str, payload: &str, sig: &str) -> bool {
     mac.verify_slice(&bytes).is_ok()
 }
 
-fn cookie_value(header: &str, name: &str) -> Option<String> {
+pub(crate) fn cookie_value(header: &str, name: &str) -> Option<String> {
     for part in header.split(';') {
         let Some((key, value)) = part.trim().split_once('=') else {
             continue;
@@ -616,9 +674,20 @@ fn github_identity(
         .get("login")
         .and_then(|value| value.as_str())
         .unwrap_or("");
+    let handle = clean_handle(login);
+    let profile = user
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    let email = user
+        .get("email")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     Ok(Identity {
         who: format!("github:{id}"),
-        handle: clean_handle(login),
+        handle: handle.clone(),
+        name: display_name(profile, &handle),
+        email: clean_email(email),
     })
 }
 
@@ -683,9 +752,15 @@ fn google_identity(
     if !valid_who(&format!("google:{sub}")) {
         return Err("the provider did not complete sign-in.".into());
     }
+    let profile = user
+        .get("name")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
     Ok(Identity {
         who: format!("google:{sub}"),
-        handle,
+        handle: handle.clone(),
+        name: display_name(profile, &handle),
+        email: clean_email(email),
     })
 }
 
@@ -841,5 +916,18 @@ mod tests {
         assert_eq!(clean_handle("Ada North"), "AdaNorth");
         assert_eq!(clean_handle("phext"), "reader");
         assert_eq!(clean_handle("octocat"), "octocat");
+    }
+
+    #[test]
+    fn profile_names_keep_spaces_and_email_is_lowercase() {
+        assert_eq!(display_name("Stewart Alsop", "stewart"), "Stewart Alsop");
+        assert_eq!(display_name("  ", "stewart"), "stewart");
+        assert_eq!(clean_email("Stewart@Example.com"), "stewart@example.com");
+        assert!(clean_email("not an email").is_empty());
+        let session = Oauth::test_ready()
+            .read_session(&format!("lanes_session={}", Oauth::test_session_cookie()))
+            .unwrap();
+        assert_eq!(session.name, "The Octocat");
+        assert_eq!(session.email, "octo@example.com");
     }
 }

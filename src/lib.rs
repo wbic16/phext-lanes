@@ -12,6 +12,7 @@ pub mod config;
 pub mod coord;
 pub mod error;
 pub mod fabric;
+pub mod invite;
 pub mod limit;
 pub mod link;
 pub mod model;

@@ -36,8 +36,14 @@ struct Cli {
     port: Option<u16>,
 
     /// Replace the phext with the demo cast, then run the command.
+    /// This wipes an existing chat. `--empty` will not.
     #[arg(long, global = true)]
     seed: bool,
+
+    /// Create a new chat with a General thread and no demo cast.
+    /// Refuses to replace a file that already has content.
+    #[arg(long, global = true)]
+    empty: bool,
 
     /// Show coordinates, scores, and what the feed held back.
     #[arg(long, global = true)]
@@ -72,6 +78,28 @@ enum Command {
         #[arg(long)]
         index: bool,
     },
+    /// Create, list, or revoke invite links for the private chat.
+    Invite {
+        #[command(subcommand)]
+        action: InviteAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum InviteAction {
+    /// Print a new invite link once. The token is not stored.
+    Create {
+        /// How many joins the link allows. 1 is single-use. 0 does not run out.
+        #[arg(long, default_value_t = 1)]
+        uses: u32,
+        /// Drop the link after this many days. Omit it to keep the link until you revoke it.
+        #[arg(long)]
+        days: Option<u32>,
+    },
+    /// Show invite ids, remaining uses, and expiry. Tokens are not shown.
+    List,
+    /// Stop an invite from being used.
+    Revoke { id: String },
 }
 
 #[cfg(unix)]
@@ -100,11 +128,27 @@ async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
     let settings = lanes::config::load(cli.user.as_deref(), cli.file.as_deref())?;
     let listen = lanes::config::load_listen(cli.host.as_deref(), cli.port)?;
+    check_flags(cli.seed, cli.empty)?;
     if cli.seed {
+        eprintln!(
+            "warning: --seed replaces {} with the demo cast. This wipes whatever is already in that file.",
+            settings.file.display()
+        );
         let mut store = Store::open(&settings.file)?;
         store.reseed(Utc::now())?;
         if cli.command.is_none() {
             println!("seeded {}", store.path().display());
+            return Ok(());
+        }
+    }
+    if cli.empty {
+        Store::init_empty(&settings.file)?;
+        println!(
+            "created {} with a General thread and no demo cast.",
+            settings.file.display()
+        );
+        println!("--empty does not replace a chat that already exists.");
+        if cli.command.is_none() {
             return Ok(());
         }
     }
@@ -130,6 +174,7 @@ async fn run() -> Result<(), Error> {
                 cli.details,
             )
         }
+        Some(Command::Invite { action }) => invite_cmd(&settings, action),
         Some(Command::Read {
             query,
             scroll,
@@ -148,6 +193,86 @@ async fn run() -> Result<(), Error> {
     }
 }
 
+fn check_flags(seed: bool, empty: bool) -> Result<(), Error> {
+    if seed && empty {
+        Err(Error::Bad(
+            "use either --seed or --empty. --seed replaces the file with the demo cast and wipes it. --empty only creates a missing chat and never overwrites one."
+                .into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn invite_cmd(settings: &Settings, action: InviteAction) -> Result<(), Error> {
+    let path = lanes::invite::resolve(&settings.file);
+    match action {
+        InviteAction::Create { uses, days } => {
+            let exp = match days {
+                None => None,
+                Some(0) => return Err(Error::Bad(
+                    "--days must be at least 1, or omit it and the link lasts until you revoke it"
+                        .into(),
+                )),
+                Some(days) if days > 3650 => {
+                    return Err(Error::Bad("--days must be 3650 or fewer".into()))
+                }
+                Some(days) => Some(Utc::now() + chrono::Duration::days(i64::from(days))),
+            };
+            let issued = lanes::invite::create(&path, uses, exp, Utc::now())?;
+            let life = if uses == 0 {
+                "unlimited".to_string()
+            } else if uses == 1 {
+                "single-use".to_string()
+            } else {
+                format!("{uses} uses")
+            };
+            let until = match issued.exp {
+                Some(when) => format!("expires {}", when.format("%Y-%m-%d")),
+                None => "until revoked".to_string(),
+            };
+            println!("{id}  {life}  {until}", id = issued.id);
+            println!("This token is shown once and is not stored.");
+            println!("{}", invite_url(&issued.token));
+            Ok(())
+        }
+        InviteAction::List => {
+            for row in lanes::invite::list(&path)? {
+                let life = if row.revoked {
+                    "revoked".to_string()
+                } else if row.uses == 0 {
+                    "unlimited".to_string()
+                } else if row.uses == 1 {
+                    format!("single-use  {} left", row.remaining)
+                } else {
+                    format!("{} uses  {} left", row.uses, row.remaining)
+                };
+                let until = match row.exp {
+                    Some(when) => format!("expires {}", when.format("%Y-%m-%d")),
+                    None => "until revoked".to_string(),
+                };
+                println!("{}  {life}  {until}", row.id);
+            }
+            Ok(())
+        }
+        InviteAction::Revoke { id } => {
+            lanes::invite::revoke(&path, &id)?;
+            println!("revoked {id}");
+            Ok(())
+        }
+    }
+}
+
+fn invite_url(token: &str) -> String {
+    let origin = std::env::var("LANES_PUBLIC_ORIGIN").unwrap_or_default();
+    let origin = origin.trim().trim_end_matches('/').to_string();
+    if origin.is_empty() {
+        format!("/join/{token}")
+    } else {
+        format!("{origin}/join/{token}")
+    }
+}
+
 fn require_user<'a>(world: &'a World, query: &str) -> Result<&'a lanes::model::User, Error> {
     world.find_user(query).ok_or_else(|| {
         let known = world
@@ -162,16 +287,22 @@ fn require_user<'a>(world: &'a World, query: &str) -> Result<&'a lanes::model::U
 
 fn print_feed(store: &Store, settings: &Settings, details: bool) -> Result<(), Error> {
     let world = store.world();
-    let user = require_user(&world, &settings.user)?;
+    let interests;
+    let interest_ref: &[libphext::phext::Coordinate] = if world.users.is_empty() {
+        &[]
+    } else {
+        interests = require_user(world, &settings.user)?.interests.clone();
+        &interests
+    };
     let feed = rank::build_feed(
         &world.threads,
-        &user.interests,
+        interest_ref,
         Utc::now(),
         rank::AUTHOR_CAP,
         rank::MAX_THREADS,
     );
     if feed.threads.is_empty() {
-        println!("Nothing here yet.");
+        print_quiet(world);
         return Ok(());
     }
     println!("{}", calm::format_feed(&feed, details));
@@ -220,6 +351,22 @@ fn post(
         println!("{}", format_coord(placed.coord));
     }
     Ok(())
+}
+
+fn print_quiet(world: &World) {
+    let quiet: Vec<&str> = world
+        .threads
+        .iter()
+        .filter(|thread| !thread.plain && thread.messages.is_empty())
+        .map(|thread| thread.title.as_str())
+        .collect();
+    if quiet.is_empty() {
+        println!("Nothing here yet.");
+    } else {
+        for title in quiet {
+            println!("{title}");
+        }
+    }
 }
 
 fn print_destination(
@@ -285,7 +432,7 @@ fn read(
     let thread = if let Some(query) = query {
         world.find_thread(query).map_err(Error::from)?
     } else {
-        let user = require_user(&world, &settings.user)?;
+        let user = require_user(world, &settings.user)?;
         let feed = rank::build_feed(
             &world.threads,
             &user.interests,
@@ -350,6 +497,32 @@ mod tests {
         for gone in ["suggest", "room", "toc", "select", "seed", "serve"] {
             assert!(!names.iter().any(|name| name == gone), "{names:?}");
         }
+        assert!(names.contains(&"invite".to_string()));
+    }
+
+    #[test]
+    fn empty_and_invite_parse_and_seed_will_not_combine_with_empty() {
+        let empty = Cli::try_parse_from(["lanes", "--empty"]).unwrap();
+        assert!(empty.empty);
+        assert!(!empty.seed);
+        let invite =
+            Cli::try_parse_from(["lanes", "invite", "create", "--uses", "4", "--days", "14"])
+                .unwrap();
+        match invite.command {
+            Some(Command::Invite {
+                action: InviteAction::Create { uses, days },
+            }) => {
+                assert_eq!(uses, 4);
+                assert_eq!(days, Some(14));
+            }
+            other => panic!("expected invite create, got {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["lanes", "invite", "list"]).is_ok());
+        assert!(Cli::try_parse_from(["lanes", "invite", "revoke", "abc"]).is_ok());
+        let err = check_flags(true, true).unwrap_err();
+        assert!(err.to_string().contains("never overwrites"), "{err}");
+        assert!(check_flags(true, false).is_ok());
+        assert!(check_flags(false, true).is_ok());
     }
 
     #[test]

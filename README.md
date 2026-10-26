@@ -210,7 +210,7 @@ You should see scroll breaks (`0x17`) between messages, a shelf break (`0x1f`) b
 
 ### Memory
 
-Each phext is memory-mapped once and indexed in one linear pass: a hashmap from coordinate to the scroll's bytes in the mapping (`src/scrolls.rs`). Reading a scroll is a lookup and a slice. Downloads hand out the mapped bytes. The tokenizer and serializer follow libphext's break rules exactly, and the tests compare them against `phext::explode`, `phext::implode`, and `phext::textmap`. They replace those calls because libphext 0.3.1 copies the rest of the document for every scroll, which took about 40 seconds to open a 3.5 MB fabric.
+Each phext is memory-mapped once and indexed in one linear pass: a hashmap from coordinate to the scroll's bytes in the mapping (`src/scrolls.rs`). Reading a scroll is a lookup and a slice. Downloads hand out the mapped bytes. The tokenizer and serializer follow libphext's break rules exactly, and the tests compare them against `phext::explode`, `phext::implode`, and `phext::textmap`. They were written because libphext 0.3.1 copied the rest of the document for every scroll, which took about 40 seconds to open a 3.5 MB fabric. libphext 0.3.2 fixes that, and Lanes now uses it, but keeps its own index because it points into the mapped file rather than copying each scroll.
 
 A write merges its scrolls into the map, serializes once, writes a temporary file, renames it over the old one, and maps the new file. Lanes never writes into a mapped file. Editing a live `.phext` in place with another program while the server runs is not supported; stop the service first, or replace the file by rename.
 

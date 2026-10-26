@@ -1,8 +1,10 @@
 //! A linear-time phext index.
 //!
-//! libphext 0.3.1 tokenizes by copying the rest of the document after every
-//! scroll, so `explode`, `fetch`, and `textmap` are quadratic. A 3.5 MB
-//! fabric took about 40 seconds to open. This module walks the bytes once.
+//! libphext before 0.3.2 tokenized by copying the rest of the document after
+//! every scroll, so a 3.5 MB fabric took about 40 seconds to open. 0.3.2 is
+//! linear, but `explode` still hands back owned strings. This module keeps
+//! byte ranges instead, so a scroll can be read straight out of the mapped
+//! file.
 //!
 //! [`tokenize`] maps every non-empty scroll to its byte range, using the
 //! same break rules as `phext::explode`. [`serialize`] writes scrolls back

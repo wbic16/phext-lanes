@@ -31,8 +31,8 @@ fn time<T>(label: &str, runs: u32, mut body: impl FnMut() -> T) -> T {
     last.expect("at least one run")
 }
 
-/// Compare the linear index with libphext on a real file. libphext is
-/// quadratic, so keep this to files of a few hundred kilobytes.
+/// Compare the linear index with libphext on a real file. Before libphext
+/// 0.3.2 this was quadratic; with 0.3.2 it handles multi-megabyte files.
 fn check(input: &str) {
     let doc = std::fs::read_to_string(input).expect("read");
     let ours: std::collections::HashMap<_, _> = lanes::scrolls::tokenize(&doc)

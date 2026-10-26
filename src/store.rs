@@ -1,11 +1,17 @@
 //! The chat is one phext document.
 //!
-//! Writes go through [`phext::insert`]. Reads of a single scroll go through
-//! [`phext::fetch`]. The table of contents is [`phext::textmap`], and the
-//! byte index is [`phext::index`].
+//! The file is memory-mapped. One linear pass ([`scrolls::tokenize`]) builds
+//! a hashmap from coordinate to the scroll's bytes in the mapping, so reading
+//! a scroll is a lookup and a slice. Downloads hand out the mapped bytes.
+//!
+//! A write merges its scrolls into that map, serializes once
+//! ([`scrolls::serialize`]), writes a temporary file, renames it over the
+//! old one, and maps the new file. The mapped file itself is never written
+//! to, so the mapping cannot change under a reader.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -17,6 +23,7 @@ use crate::coord::{
 };
 use crate::error::Error;
 use crate::model::{self, LaneSettings, Message, Scroll, Thread, User};
+use crate::scrolls;
 use crate::seed;
 
 #[derive(Debug, Clone)]
@@ -154,22 +161,63 @@ pub struct Placed {
     pub new_thread: bool,
 }
 
+/// The file's bytes: memory-mapped from disk, or held in memory before the
+/// first save (a new chat, or a store built from a string in tests).
+enum Bytes {
+    Mapped(memmap2::Mmap),
+    Owned(String),
+}
+
+impl Bytes {
+    fn as_str(&self) -> &str {
+        match self {
+            // SAFETY: `map_file` checked these bytes are UTF-8. Lanes never
+            // writes to a mapped file; a save writes a new file and renames it.
+            Bytes::Mapped(map) => unsafe { std::str::from_utf8_unchecked(map) },
+            Bytes::Owned(text) => text,
+        }
+    }
+}
+
+/// Map `path` read-only. An empty file is held as an empty string, since an
+/// empty mapping is not allowed everywhere.
+fn map_file(path: &Path) -> Result<Bytes, Error> {
+    let file = fs::File::open(path)?;
+    if file.metadata()?.len() == 0 {
+        return Ok(Bytes::Owned(String::new()));
+    }
+    // SAFETY: the mapping is read-only, and Lanes replaces files by rename
+    // rather than writing into them. Another program truncating the file
+    // in place while it is mapped is not supported.
+    let map = unsafe { memmap2::Mmap::map(&file)? };
+    if std::str::from_utf8(&map).is_err() {
+        return Err(Error::Bad(format!("{} is not utf-8", path.display())));
+    }
+    Ok(Bytes::Mapped(map))
+}
+
 pub struct Store {
     path: PathBuf,
-    doc: String,
+    bytes: Bytes,
+    /// Every non-empty scroll and its byte range in `bytes`, in document order.
+    tokens: Vec<(Coordinate, Range<usize>)>,
+    /// Coordinate to its position in `tokens`: the hashmap interface.
+    index: HashMap<Coordinate, usize>,
     /// Parsed once per save, then reused. A read does not scan the phext again.
     world: World,
     /// Coordinates that hold text, from the same pass as `world`.
     filled: BTreeSet<Coordinate>,
+    /// Bumped on every save, so callers can cache what they derive.
+    version: u64,
 }
 
 impl Store {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, Error> {
         let path = path.into();
         if path.exists() {
-            let doc = fs::read_to_string(&path)?;
-            if !doc.trim().is_empty() {
-                return Ok(Store::from_doc(path, doc));
+            let bytes = map_file(&path)?;
+            if !bytes.as_str().trim().is_empty() {
+                return Ok(Store::from_bytes(path, bytes));
             }
         }
         // A new chat starts with a General thread and the phext primer.
@@ -183,28 +231,76 @@ impl Store {
         &self.path
     }
 
+    /// The whole phext, straight from the mapping.
     pub fn doc(&self) -> &str {
-        &self.doc
+        self.bytes.as_str()
+    }
+
+    /// Bumped on every save. Equal versions mean equal contents.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Load a fabric that already exists. Do not seed over it.
     pub fn load_doc(path: impl Into<PathBuf>) -> Result<Self, Error> {
         let path = path.into();
-        let bytes = fs::read(&path)?;
-        let doc = String::from_utf8(bytes).map_err(|_| Error::Bad("fabric is not utf-8".into()))?;
-        if doc.trim().is_empty() {
+        let bytes = map_file(&path).map_err(|err| match err {
+            Error::Bad(_) => Error::Bad("fabric is not utf-8".into()),
+            other => other,
+        })?;
+        if bytes.as_str().trim().is_empty() {
             return Err(Error::Bad("fabric is empty".into()));
         }
-        Ok(Store::from_doc(path, doc))
+        Ok(Store::from_bytes(path, bytes))
     }
 
     pub fn from_doc(path: impl Into<PathBuf>, doc: String) -> Self {
-        let (world, filled) = indexed(&doc);
-        Store {
-            path: path.into(),
-            doc,
-            world,
-            filled,
+        Store::from_bytes(path.into(), Bytes::Owned(doc))
+    }
+
+    fn from_bytes(path: PathBuf, bytes: Bytes) -> Self {
+        let mut store = Store {
+            path,
+            bytes,
+            tokens: Vec::new(),
+            index: HashMap::new(),
+            world: empty_world(),
+            filled: BTreeSet::new(),
+            version: 0,
+        };
+        store.rebuild();
+        store
+    }
+
+    /// One linear pass over the bytes: the scroll map, then the world.
+    fn rebuild(&mut self) {
+        let doc = self.bytes.as_str();
+        self.tokens = scrolls::tokenize(doc);
+        self.index = self
+            .tokens
+            .iter()
+            .enumerate()
+            .map(|(at, (coord, _))| (*coord, at))
+            .collect();
+        let scrolls: Vec<(Coordinate, &str)> = self
+            .tokens
+            .iter()
+            .map(|(coord, range)| (*coord, &doc[range.clone()]))
+            .collect();
+        self.filled = scrolls
+            .iter()
+            .filter(|(_, raw)| !raw.trim().is_empty())
+            .map(|(coord, _)| *coord)
+            .collect();
+        self.world = world_from_scrolls(&scrolls);
+        self.version += 1;
+    }
+
+    /// One scroll's text, borrowed from the mapping. Empty when nothing is there.
+    pub fn text(&self, coord: Coordinate) -> &str {
+        match self.index.get(&coord) {
+            Some(&at) => &self.doc()[self.tokens[at].1.clone()],
+            None => "",
         }
     }
 
@@ -213,31 +309,23 @@ impl Store {
         &self.world
     }
 
-    /// `phext::fetch`
+    /// One scroll, as `phext::fetch` returns it.
     pub fn select(&self, coord: Coordinate) -> String {
-        phext::fetch(&self.doc, coord)
+        self.text(coord).to_string()
     }
 
-    /// `phext::textmap`
+    /// The contents listing, as `phext::textmap` writes it.
     pub fn toc(&self) -> String {
-        phext::textmap(&self.doc)
+        scrolls::textmap(self.doc(), &self.tokens)
     }
 
-    /// Offsets from `phext::index`, one coordinate per line.
+    /// Where each scroll starts in the file, one coordinate per line.
     pub fn byte_index(&self) -> String {
-        let indexed = phext::index(&self.doc);
-        let map = phext::explode(&indexed);
-        let mut coords: Vec<Coordinate> = map.keys().copied().collect();
-        coords.sort();
-        let mut lines = Vec::new();
-        for coord in coords {
-            let offset = map[&coord].trim();
-            if offset.is_empty() {
-                continue;
-            }
-            lines.push(format!("{}  byte {offset}", format_coord(coord)));
-        }
-        lines.join("\n")
+        self.tokens
+            .iter()
+            .map(|(coord, range)| format!("{}  byte {}", format_coord(*coord), range.start))
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub fn reseed(&mut self, now: DateTime<Utc>) -> Result<(), Error> {
@@ -284,8 +372,7 @@ impl Store {
             };
             let mut user = existing;
             user.name = name;
-            let doc = phext::replace(&self.doc, coord, &user.to_scroll());
-            self.persist(doc)?;
+            self.write(vec![(coord, user.to_scroll())])?;
             return Ok(false);
         }
         let coord = self.next_roster()?;
@@ -295,9 +382,7 @@ impl Store {
             blurb: String::new(),
             interests: Vec::new(),
         };
-        let mut doc = self.doc.clone();
-        doc = phext::insert(doc, coord, &user.to_scroll());
-        self.persist(doc)?;
+        self.write(vec![(coord, user.to_scroll())])?;
         Ok(true)
     }
 
@@ -326,20 +411,12 @@ impl Store {
         if user.interests.len() > 8 {
             user.interests.remove(1);
         }
-        let doc = phext::replace(&self.doc, at, &user.to_scroll());
-        self.persist(doc)?;
-        Ok(())
+        self.write(vec![(at, user.to_scroll())])
     }
 
     /// Write the settings scroll, replacing any earlier one.
     pub fn save_settings(&mut self, settings: &LaneSettings) -> Result<(), Error> {
-        let at = settings_coord();
-        let doc = if self.filled.contains(&at) {
-            phext::replace(&self.doc, at, &settings.to_scroll())
-        } else {
-            phext::insert(self.doc.clone(), at, &settings.to_scroll())
-        };
-        self.persist(doc)
+        self.write(vec![(settings_coord(), settings.to_scroll())])
     }
 
     pub fn place(&mut self, post: Post) -> Result<Placed, Error> {
@@ -393,7 +470,7 @@ impl Store {
             return Err(Error::Bad("that thread has no free scroll left".into()));
         }
 
-        let mut doc = self.doc.clone();
+        let mut edits = Vec::new();
         let (title, topic) = if let Some(thread) = existing {
             (thread.title, thread.topic)
         } else {
@@ -401,13 +478,13 @@ impl Store {
             let title = model::title_from_text(&text);
             if !anchor_taken {
                 let card = model::format_card(&topic, &title, &model::keyword_line(&text));
-                doc = phext::insert(doc, anchor, &card);
+                edits.push((anchor, card));
             }
             (title, topic)
         };
         let body = model::format_message_as(&author, &post.who, post.now, &text);
-        doc = phext::insert(doc, coord, &body);
-        self.persist(doc)?;
+        edits.push((coord, body));
+        self.write(edits)?;
 
         Ok(Placed {
             coord,
@@ -423,7 +500,7 @@ impl Store {
             if !is_roster(*coord) {
                 return false;
             }
-            match model::parse_scroll(&phext::fetch(&self.doc, *coord)) {
+            match model::parse_scroll(self.text(*coord)) {
                 Some(Scroll::User(user)) => user.id == id,
                 _ => false,
             }
@@ -440,6 +517,23 @@ impl Store {
             }
         }
         Err(Error::Bad("the roster is full".into()))
+    }
+
+    /// Set these scrolls, keep every other one, and save.
+    fn write(&mut self, edits: Vec<(Coordinate, String)>) -> Result<(), Error> {
+        let doc = {
+            let current = self.doc();
+            let mut merged: BTreeMap<Coordinate, &str> = self
+                .tokens
+                .iter()
+                .map(|(coord, range)| (*coord, &current[range.clone()]))
+                .collect();
+            for (coord, text) in &edits {
+                merged.insert(*coord, text.as_str());
+            }
+            scrolls::serialize(merged)
+        };
+        self.persist(doc)
     }
 
     fn persist(&mut self, doc: String) -> Result<(), Error> {
@@ -460,11 +554,19 @@ impl Store {
             .unwrap_or_else(|| Path::new("."))
             .join(format!(".{name}.tmp"));
         fs::write(&tmp, &doc)?;
-        fs::rename(&tmp, &self.path)?;
-        self.doc = doc;
-        let (world, filled) = indexed(&self.doc);
-        self.world = world;
-        self.filled = filled;
+        // Let go of the old mapping first: Windows will not rename over a
+        // mapped file. Readers see `doc` from memory until the new map is in.
+        let previous = std::mem::replace(&mut self.bytes, Bytes::Owned(doc));
+        if let Err(err) = fs::rename(&tmp, &self.path) {
+            self.bytes = previous;
+            let _ = fs::remove_file(&tmp);
+            return Err(err.into());
+        }
+        drop(previous);
+        if let Ok(mapped) = map_file(&self.path) {
+            self.bytes = mapped;
+        }
+        self.rebuild();
         Ok(())
     }
 }
@@ -474,40 +576,27 @@ fn settings_coord() -> Coordinate {
     coord::parse_coord(coord::SETTINGS_COORD).expect("settings coordinate")
 }
 
-fn indexed(doc: &str) -> (World, BTreeSet<Coordinate>) {
-    if doc.is_empty() {
-        return (
-            World {
-                users: Vec::new(),
-                threads: Vec::new(),
-                settings: LaneSettings::default(),
-            },
-            BTreeSet::new(),
-        );
+fn empty_world() -> World {
+    World {
+        users: Vec::new(),
+        threads: Vec::new(),
+        settings: LaneSettings::default(),
     }
-    let map = phext::explode(doc);
-    let filled = map
-        .iter()
-        .filter(|(_, raw)| !raw.trim().is_empty())
-        .map(|(coord, _)| *coord)
-        .collect();
-    (world_from_map(&map), filled)
 }
 
 pub fn world_from(doc: &str) -> World {
-    indexed(doc).0
+    let scrolls: Vec<(Coordinate, &str)> = scrolls::tokenize(doc)
+        .into_iter()
+        .map(|(coord, range)| (coord, &doc[range]))
+        .collect();
+    world_from_scrolls(&scrolls)
 }
 
-fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World {
-    if map.is_empty() {
-        return World {
-            users: Vec::new(),
-            threads: Vec::new(),
-            settings: LaneSettings::default(),
-        };
+/// Readers, threads, and settings from scrolls in document order.
+fn world_from_scrolls(scrolls: &[(Coordinate, &str)]) -> World {
+    if scrolls.is_empty() {
+        return empty_world();
     }
-    let mut coords: Vec<Coordinate> = map.keys().copied().collect();
-    coords.sort();
 
     let mut users = Vec::new();
     let mut settings = LaneSettings::default();
@@ -517,8 +606,7 @@ fn world_from_map(map: &std::collections::HashMap<Coordinate, String>) -> World 
     let mut plain: BTreeMap<String, Vec<Message>> = BTreeMap::new();
     let mut plain_anchors: BTreeMap<String, Coordinate> = BTreeMap::new();
 
-    for coord in coords {
-        let raw = &map[&coord];
+    for &(coord, raw) in scrolls {
         if raw.trim().is_empty() {
             continue;
         }

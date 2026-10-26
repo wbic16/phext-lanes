@@ -183,7 +183,7 @@ The north-wall ferns finally unfurled.
 
 A scroll that is not a reader, a thread card, or a message is still shown. Those scrolls are grouped by chapter and section, titled from the first line, and left read-only. A file that mixes both keeps the chat threads as they are. The feed lists section lanes forty at a time, and an open section loads forty scrolls at a time.
 
-Dimension breaks are stripped out of anything a person types, so a message cannot split the file. Newlines stay inside the scroll. Writes call `phext::insert`. A single scroll is read with `phext::fetch`. The contents listing is `phext::textmap`; byte offsets come from `phext::index`.
+Dimension breaks are stripped out of anything a person types, so a message cannot split the file. Newlines stay inside the scroll. How the server holds a phext is under [Memory](#memory).
 
 The delimiters, as libphext defines them:
 
@@ -207,6 +207,24 @@ python3 -c "d=open('data/chat.phext','rb').read(); print({hex(b): d.count(bytes(
 ```
 
 You should see scroll breaks (`0x17`) between messages, a shelf break (`0x1f`) between General and the gardens, a volume break (`0x1c`) between Fern wall and Seed swap, and library breaks (`0x01`) between topics.
+
+### Memory
+
+Each phext is memory-mapped once and indexed in one linear pass: a hashmap from coordinate to the scroll's bytes in the mapping (`src/scrolls.rs`). Reading a scroll is a lookup and a slice. Downloads hand out the mapped bytes. The tokenizer and serializer follow libphext's break rules exactly, and the tests compare them against `phext::explode`, `phext::implode`, and `phext::textmap`. They replace those calls because libphext 0.3.1 copies the rest of the document for every scroll, which took about 40 seconds to open a 3.5 MB fabric.
+
+A write merges its scrolls into the map, serializes once, writes a temporary file, renames it over the old one, and maps the new file. Lanes never writes into a mapped file. Editing a live `.phext` in place with another program while the server runs is not supported; stop the service first, or replace the file by rename.
+
+The feed (`/api/state`) and the contents (`/api/toc`) are cached as serialized JSON per fabric, reader, and signed-in account. An entry lasts until that phext is written, a fabric is added, or ten seconds pass, since the feed ranks by recency.
+
+`cargo run --release --example bench -- big.phext` times opening, reading, the contents, and posting on a copy of any phext. `--check a.phext b.phext` compares the index with libphext on real files.
+
+| 3.5 MB, 1,000 threads × 20 notes | before | after |
+|---|---|---|
+| open | 39 s | 37 ms |
+| read one scroll | 24 ms | under 1 µs |
+| post | about 40 s | 55 ms |
+| `/api/state` (1 MB of JSON) | 105 ms once open | 2.4 ms cached |
+| `/api/toc` | 44 s | 3 ms cached |
 
 ### Feed
 

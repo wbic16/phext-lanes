@@ -258,7 +258,6 @@ pub fn parse_upload(bytes: &[u8]) -> Result<String, FabricError> {
     }
     let doc = String::from_utf8(bytes.to_vec())
         .map_err(|_| FabricError::Bad("file is not utf-8".into()))?;
-    let _ = phext::explode(&doc);
     let _ = store::world_from(&doc);
     Ok(doc)
 }
@@ -275,21 +274,23 @@ pub fn roster_only() -> String {
 }
 
 pub fn lane_document(doc: &str, thread: &Thread) -> String {
-    let mut out = String::new();
+    let all: std::collections::HashMap<_, _> = crate::scrolls::tokenize(doc)
+        .into_iter()
+        .map(|(coord, range)| (coord, &doc[range]))
+        .collect();
+    let mut wanted = Vec::new();
     if !thread.plain {
-        let anchor = crate::coord::thread_anchor(thread.coord);
-        let card = phext::fetch(doc, anchor);
-        if !card.trim().is_empty() {
-            out = phext::insert(out, anchor, &card);
-        }
+        wanted.push(crate::coord::thread_anchor(thread.coord));
     }
-    for message in &thread.messages {
-        let raw = phext::fetch(doc, message.coord);
-        if !raw.is_empty() {
-            out = phext::insert(out, message.coord, &raw);
-        }
-    }
-    out
+    wanted.extend(thread.messages.iter().map(|message| message.coord));
+    wanted.sort();
+    wanted.dedup();
+    crate::scrolls::serialize(
+        wanted
+            .into_iter()
+            .filter_map(|coord| all.get(&coord).map(|text| (coord, *text)))
+            .filter(|(_, text)| !text.trim().is_empty()),
+    )
 }
 
 struct Hit {
@@ -301,6 +302,8 @@ pub struct Hub {
     fabrics_dir: PathBuf,
     stores: Mutex<std::collections::BTreeMap<String, Arc<Mutex<Store>>>>,
     hits: Mutex<Vec<Hit>>,
+    /// Bumped when a fabric is added, since every feed lists the fabrics.
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Hub {
@@ -320,6 +323,7 @@ impl Hub {
             fabrics_dir,
             stores: Mutex::new(stores),
             hits: Mutex::new(Vec::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -346,6 +350,11 @@ impl Hub {
         names.sort();
         names.insert(0, String::new());
         Ok(names)
+    }
+
+    /// Changes whenever the list of fabrics does.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn with_store<T>(
@@ -476,6 +485,8 @@ impl Hub {
     }
 
     fn remember(&self, name: &str, path: PathBuf, doc: &str) {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if let Ok(mut stores) = self.stores.lock() {
             stores.insert(
                 name.to_string(),

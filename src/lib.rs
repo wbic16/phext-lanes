@@ -7,6 +7,7 @@
 //! number of lines.
 
 pub mod auth;
+pub mod cache;
 pub mod calm;
 pub mod config;
 pub mod coord;
@@ -18,6 +19,7 @@ pub mod link;
 pub mod model;
 pub mod oauth;
 pub mod rank;
+pub mod scrolls;
 pub mod seed;
 pub mod server;
 pub mod store;

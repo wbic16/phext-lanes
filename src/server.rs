@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Bytes;
+
+use crate::cache::Cache;
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
@@ -40,6 +42,8 @@ pub struct AppState {
     invites: std::path::PathBuf,
     /// Server-wide limits. A lane's settings scroll can override the feed ones.
     defaults: Limits,
+    /// Serialized feeds and contents, valid until the phext changes.
+    cache: Arc<Cache>,
 }
 
 impl AppState {
@@ -106,6 +110,7 @@ impl AppState {
             owners,
             invites,
             defaults: Limits::default(),
+            cache: Arc::new(Cache::new(CACHE_TTL, CACHE_ENTRIES)),
         })
     }
 
@@ -121,6 +126,46 @@ impl AppState {
             self.owners.matches(&session.who, &session.email) || settings.is_owner(&session.who)
         })
     }
+}
+
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+const CACHE_ENTRIES: usize = 512;
+
+fn cache_key(parts: &[&str]) -> String {
+    parts.join("\u{1f}")
+}
+
+/// The JSON for `key` from memory when the phext has not changed since it
+/// was built; otherwise build it, keep it, and send it.
+fn cached_json<T: Serialize>(
+    app: &AppState,
+    fabric: Option<&str>,
+    key: String,
+    build: impl FnOnce() -> Result<T, AppError>,
+) -> Result<Response, AppError> {
+    let version = (
+        app.hub.with_store(fabric, |store| store.version())?,
+        app.hub.generation(),
+    );
+    let body = match app.cache.get(&key, version) {
+        Some(body) => body,
+        None => {
+            let value = build()?;
+            let body = Bytes::from(
+                serde_json::to_vec(&value).map_err(|err| AppError::bad(err.to_string()))?,
+            );
+            app.cache.put(key, version, body.clone());
+            body
+        }
+    };
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        )],
+        body,
+    )
+        .into_response())
 }
 
 /// `host:port`, with brackets when `host` is an IPv6 address.
@@ -259,7 +304,16 @@ fn handle(
         Route::State => {
             let session = admit_read(app, headers, fabric)?;
             let user = query.get("user").map(String::as_str);
-            Ok(Json(state_of(app, fabric, user, session.as_ref())?).into_response())
+            let who = session.as_ref().map(|session| session.who.as_str());
+            let key = cache_key(&[
+                "state",
+                fabric.unwrap_or(""),
+                user.unwrap_or(""),
+                who.unwrap_or(""),
+            ]);
+            cached_json(app, fabric, key, || {
+                state_of(app, fabric, user, session.as_ref())
+            })
         }
         Route::ApiLane(id) => {
             let session = admit_read(app, headers, fabric)?;
@@ -297,7 +351,8 @@ fn handle(
         }
         Route::Toc => {
             admit_read(app, headers, fabric)?;
-            Ok(Json(toc(app, fabric)?).into_response())
+            let key = cache_key(&["toc", fabric.unwrap_or("")]);
+            cached_json(app, fabric, key, || toc(app, fabric))
         }
         Route::Scroll => {
             admit_read(app, headers, fabric)?;
@@ -2409,6 +2464,51 @@ mod http_tests {
             .as_str()
             .unwrap()
             .contains("north-wall ferns"));
+    }
+
+    #[tokio::test]
+    async fn the_cached_feed_changes_as_soon_as_someone_posts() {
+        let (app, _file) = app();
+        let (_, before) = send(&app, get("/api/state?user=mira")).await;
+        let (_, again) = send(&app, get("/api/state?user=mira")).await;
+        assert_eq!(before, again, "a second read comes from the cache");
+        assert!(!before.contains("a fresh note about lichen"));
+        let (status, body) = send(
+            &app,
+            with_session(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/post")
+                    .header("content-type", "application/json"),
+            )
+            .body(Body::from(
+                r#"{"user":"mira","text":"a fresh note about lichen","coord":"1.2.1/1.1.1"}"#,
+            ))
+            .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, after) = send(&app, get("/api/state?user=mira")).await;
+        assert!(after.contains("a fresh note about lichen"), "{after}");
+        let (_, toc) = send(&app, get("/api/toc")).await;
+        assert!(toc.contains("1.2.1/1.1.1"), "{toc}");
+
+        let (_, other) = send(&app, get("/api/state?user=casey")).await;
+        let other: serde_json::Value = serde_json::from_str(&other).unwrap();
+        assert_eq!(
+            other["viewer"]["id"], "casey",
+            "readers do not share an entry"
+        );
+
+        let (_, listed) = send(&app, get("/api/state?user=mira")).await;
+        assert!(!listed.contains("\"name\":\"notes\""));
+        let (status, body) = send(&app, bearer("plot-secret")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, listed) = send(&app, get("/api/state?user=mira")).await;
+        assert!(
+            listed.contains("\"name\":\"notes\""),
+            "a new fabric shows up: {listed}"
+        );
     }
 
     #[tokio::test]

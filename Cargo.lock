@@ -547,6 +547,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libphext",
+ "memmap2",
  "serde",
  "serde_json",
  "sha2",
@@ -564,9 +565,9 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libphext"
-version = "0.3.1"
+version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "959b0562ce3da0850fb038618f7b1ac0971bf93033cfe04f6bcbfe3646fe70b9"
+checksum = "69fb9e930cf01a71abb6c6abb7717ab76818c5286e9e88555533dd54270eb474"
 dependencies = [
  "xxhash-rust",
 ]
@@ -588,6 +589,15 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "memmap2"
+version = "0.9.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd3f7eed9d3848f8b98834af67102b720745c4ec028fcd0aa0239277e7de374f"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "mime"
